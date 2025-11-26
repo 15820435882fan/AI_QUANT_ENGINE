@@ -1,0 +1,32 @@
+{
+  "trading_system": {
+    "name": "AI量化交易系统生产版",
+    "version": "1.0.0",
+    "deployment_date": "2025-11-24T20:10:35.614985"
+  },
+  "strategies": {
+    "default_combination": [
+      "SimpleMovingAverageStrategy",
+      "MACDStrategySmart"
+    ],
+    "optimization_settings": {
+      "generations": 20,
+      "population_size": 15,
+      "evaluation_period": 300
+    }
+  },
+  "risk_management": {
+    "max_position_size": 0.1,
+    "daily_loss_limit": 0.05,
+    "max_drawdown": 0.15
+  },
+  "monitoring": {
+    "health_check_interval": 60,
+    "performance_report_interval": 3600
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/trading_system.log",
+    "max_size_mb": 100
+  }
+}
