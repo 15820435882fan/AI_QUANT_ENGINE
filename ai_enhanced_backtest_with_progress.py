@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-高频交易回测系统 - AI优化增强版本
-集成AI策略优化和详细报告系统
+高频交易回测系统 - 纯Python进度条版本
+不依赖外部库，内置进度显示
 """
 
 import os
@@ -12,13 +12,112 @@ import logging
 import argparse
 from datetime import datetime, timedelta
 import warnings
-from typing import Dict, List, Any
-import json
+import time
 warnings.filterwarnings('ignore')
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('AIEnhancedBacktest')
+
+class ProgressTracker:
+    """进度跟踪器 - 纯Python实现"""
+    
+    def __init__(self, total_symbols, total_iterations):
+        self.total_symbols = total_symbols
+        self.total_iterations = total_iterations
+        self.current_symbol = 0
+        self.current_iteration = 0
+        self.start_time = time.time()
+        self.symbol_progress = {}
+        self.last_update_time = time.time()
+        
+    def update_symbol(self, symbol_name, current, total):
+        """更新币种进度"""
+        self.symbol_progress[symbol_name] = (current, total)
+        
+    def increment_symbol(self):
+        """增加完成的币种计数"""
+        self.current_symbol += 1
+        
+    def get_elapsed_time(self):
+        """获取已用时间"""
+        elapsed = time.time() - self.start_time
+        return timedelta(seconds=int(elapsed))
+    
+    def get_progress_string(self):
+        """获取进度字符串"""
+        elapsed = self.get_elapsed_time()
+        symbol_progress = f"币种: {self.current_symbol}/{self.total_symbols}"
+        
+        progress_details = []
+        for symbol, (current, total) in self.symbol_progress.items():
+            if total > 0:
+                percent = (current / total) * 100
+                progress_details.append(f"{symbol}: {percent:.1f}%")
+        
+        details = " | ".join(progress_details) if progress_details else "初始化中..."
+        
+        if self.current_iteration > 0:
+            iterations_per_second = self.current_iteration / (time.time() - self.start_time)
+            remaining_iterations = self.total_iterations - self.current_iteration
+            eta_seconds = remaining_iterations / iterations_per_second if iterations_per_second > 0 else 0
+            eta = timedelta(seconds=int(eta_seconds))
+            time_info = f" | 速度: {iterations_per_second:.1f}it/s | ETA: {eta}"
+        else:
+            time_info = ""
+            
+        return f"🔄 {symbol_progress} | {details} | 用时: {elapsed}{time_info}"
+
+class SimpleProgressBar:
+    """简单进度条 - 纯Python实现"""
+    
+    def __init__(self, total, description="Progress", bar_length=40):
+        self.total = total
+        self.current = 0
+        self.description = description
+        self.start_time = time.time()
+        self.bar_length = bar_length
+        self.last_percent = -1
+        
+    def update(self, n=1):
+        """更新进度"""
+        self.current += n
+        self._display()
+        
+    def _display(self):
+        """显示进度条 - 只在进度有显著变化时更新"""
+        percent = self.current / self.total
+        
+        # 只有当进度变化超过1%时才更新显示，减少闪烁
+        if int(percent * 100) == int(self.last_percent * 100) and self.current < self.total:
+            return
+            
+        self.last_percent = percent
+        
+        filled_length = int(self.bar_length * percent)
+        bar = '█' * filled_length + '─' * (self.bar_length - filled_length)
+        
+        elapsed = time.time() - self.start_time
+        if self.current > 0:
+            items_per_second = self.current / elapsed
+            eta_seconds = (self.total - self.current) / items_per_second if items_per_second > 0 else 0
+            eta = timedelta(seconds=int(eta_seconds))
+            time_info = f" {elapsed:.0f}s [{eta} left]"
+        else:
+            time_info = ""
+            
+        # 使用回车符覆盖上一行
+        sys.stdout.write(f'\r{self.description}: |{bar}| {percent:.1%} ({self.current}/{self.total}){time_info}')
+        sys.stdout.flush()
+        
+    def close(self):
+        """完成进度条"""
+        # 显示100%完成
+        bar = '█' * self.bar_length
+        elapsed = time.time() - self.start_time
+        sys.stdout.write(f'\r{self.description}: |{bar}| 100.0% ({self.total}/{self.total}) {elapsed:.0f}s [完成!]')
+        sys.stdout.write('\n')
+        sys.stdout.flush()
 
 class AIStrategyOptimizer:
     """AI策略优化器"""
@@ -235,7 +334,7 @@ class EnhancedSignalDetector:
         return pd.DataFrame(signals)
 
 class AdvancedBacktest:
-    """高级回测系统 - 集成AI优化和详细报告"""
+    """高级回测系统 - 集成AI优化和进度显示"""
     
     def __init__(self, initial_capital=10000, compound_mode=True, leverage=3):
         self.initial_capital = initial_capital
@@ -252,24 +351,47 @@ class AdvancedBacktest:
         logger.info("🚀 AI增强回测系统初始化完成")
     
     def run_advanced_backtest(self, symbols, days=30):
-        """运行高级回测"""
+        """运行高级回测 - 带进度显示"""
         logger.info(f"🎯 开始AI优化回测: {symbols} {days}天")
         
         all_results = []
         detailed_trades = []
         
-        for symbol in symbols:
-            logger.info(f"\n🔍 AI优化测试: {symbol}")
+        # 计算总迭代次数用于进度条
+        total_iterations = len(symbols) * days * 24  # 估算值
+        
+        # 创建进度跟踪器
+        progress_tracker = ProgressTracker(len(symbols), total_iterations)
+        
+        for symbol_idx, symbol in enumerate(symbols):
+            logger.info(f"\n🔍 AI优化测试: {symbol} ({symbol_idx + 1}/{len(symbols)})")
             
             try:
                 # 生成模拟数据
                 data = self._generate_realistic_data(symbol, days)
                 logger.info(f"✅ 生成 {symbol} 数据: {len(data)} 条")
                 
+                # 创建币种进度条
+                symbol_progress = SimpleProgressBar(
+                    len(data) - 50, 
+                    description=f"📊 {symbol} 回测"
+                )
+                
                 # 运行AI优化回测
-                result = self._run_ai_optimized_backtest(symbol, data)
+                result = self._run_ai_optimized_backtest(symbol, data, symbol_progress, progress_tracker)
                 all_results.append(result)
                 detailed_trades.extend(result['detailed_trades'])
+                
+                # 完成币种进度
+                symbol_progress.close()
+                progress_tracker.increment_symbol()
+                
+                # 显示中间结果
+                if result['trades']:
+                    metrics = result['metrics']
+                    logger.info(f"   ✅ {symbol} 完成: {metrics['total_trades']}笔交易, 胜率: {metrics['win_rate']:.1f}%, 收益: ${metrics['total_pnl']:.2f}")
+                else:
+                    logger.info(f"   ⚠️  {symbol} 无交易产生")
                 
             except Exception as e:
                 logger.error(f"❌ {symbol} AI回测失败: {e}")
@@ -324,14 +446,30 @@ class AdvancedBacktest:
         
         return data
     
-    def _run_ai_optimized_backtest(self, symbol, data):
-        """运行AI优化回测"""
+    def _run_ai_optimized_backtest(self, symbol, data, progress_bar, progress_tracker):
+        """运行AI优化回测 - 带进度更新"""
         trades = []
         portfolio_values = []
         current_value = self.current_capital
         
+        total_iterations = len(data) - 50
+        last_global_update = time.time()
+        
         for i in range(50, len(data)):  # 从50开始确保有足够数据
             try:
+                # 更新进度
+                progress_bar.update(1)
+                progress_tracker.current_iteration += 1
+                progress_tracker.update_symbol(symbol, i-50, total_iterations)
+                
+                # 每2秒更新一次全局进度显示，避免过于频繁的更新
+                current_time = time.time()
+                if current_time - last_global_update > 2.0:
+                    progress_info = progress_tracker.get_progress_string()
+                    sys.stdout.write(f'\r{progress_info}')
+                    sys.stdout.flush()
+                    last_global_update = current_time
+                
                 row = data.iloc[i]
                 current_price = row['close']
                 current_time = row['timestamp']

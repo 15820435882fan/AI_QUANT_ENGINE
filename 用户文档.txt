@@ -7,8 +7,20 @@ markdown
 3. 优化参数: `python signal_optimizer.py`
 4. 系统健康检查 python system_health_check_final.py
 5. 运行最新优化回测 python high_frequency_backtest.py
-6.  验证优化效果  python high_frequency_backtest.py
+6.  验证优化效果  python multi_strategy_optimizer.py
 
+AI优化策略的工作流程
+📊 数据层 (RealMarketData)
+     ↓
+🎯 信号层 (EnhancedSniperDetector) 
+     ↓
+🤖 AI优化层 (AIStrategyOptimizer) ← 这是AI核心！
+     ↓    
+💰 仓位层 (AdvancedPositionManager)
+     ↓
+⚡ 执行层 (ProductionTradingSystem)
+     ↓
+📈 回测层 (HighFrequencyBacktest)
 ## 核心功能
 - 自动策略优化
 - 多策略组合管理
@@ -18,3 +30,35 @@ markdown
 ## 配置说明
 - 修改 `config/production_config.json`
 - 调整风险参数和交易阈值
+
+1. 数据获取阶段
+python
+# RealMarketData 获取市场数据
+market_data.get_historical_data(symbol, days, timeframe)
+2. 信号生成阶段
+python
+# EnhancedSniperDetector 生成原始信号
+signals = detector.analyze_enhanced_signals(data, symbol)
+# 输出: 信号强度、方向、置信度等
+3. AI优化阶段（核心！）
+python
+# ai_strategy_optimizer_enhanced.py - AI优化器工作流程：
+# 1. 接收原始信号和市场数据
+# 2. 使用遗传算法优化策略参数
+# 3. 评估不同参数组合的绩效
+# 4. 输出优化后的策略配置
+
+optimizer = AIStrategyOptimizer()
+optimized_strategy = optimizer.optimize_strategy(
+    strategy_class=SimpleMovingAverageStrategy,
+    data=market_data,
+    generations=10  # 进化代数
+)
+# 输出优化后的参数: {'sma_fast': 8, 'sma_slow': 21}
+4. 应用到实际交易
+python
+# 生产系统使用优化后的策略
+production_system = ProductionTradingSystem()
+production_system.add_strategy(
+    SimpleMovingAverageStrategy,
+    parameters=optimized_strategy  # 使用AI优化的参数！
