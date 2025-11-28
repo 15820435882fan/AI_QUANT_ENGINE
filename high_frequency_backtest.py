@@ -4,6 +4,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import logging
 from typing import Dict, List, Any
+from simple_sniper_detector import SimpleSniperDetector
 
 class OptimizedCapitalManager:
     """优化版资金管理器 - 移到外部类"""
@@ -17,6 +18,7 @@ class OptimizedCapitalManager:
         self.liquidated_positions = 0
         self.max_drawdown = 0
         self.peak_capital = capital
+        self.signal_detector = SimpleSniperDetector()
     
     def calculate_position_size(self, symbol, signal, is_main):
         if symbol in self.active_positions:
@@ -92,6 +94,44 @@ class OptimizedCapitalManager:
                     self.close_position(symbol, pnl, 'LIQUIDATION')
                     return True
         return False
+        def check_liquidation_risk(self, symbol, current_price, position):
+        
+        # 1. 首先验证价格合理性
+            if not self._is_price_reasonable(symbol, current_price):
+                self.logger.warning(f"⚠️ 价格异常跳过爆仓检查: {symbol} 价格: {current_price}")
+                return False
+            
+            # 2. 正常的爆仓检查逻辑
+            liquidation_price = self._calculate_liquidation_price(position)
+            
+            if (position.side == "LONG" and current_price <= liquidation_price) or \
+            (position.side == "SHORT" and current_price >= liquidation_price):
+                self.logger.warning(f"💥 {symbol} 爆仓！当前价格: {current_price}, 爆仓价: {liquidation_price}")
+                return True
+            
+            return False
+
+        def _is_price_reasonable(self, symbol, current_price):
+            """
+            价格合理性检查 - 防止异常数据导致错误爆仓
+            """
+            reasonable_ranges = {
+                'BTC/USDT': (10000, 100000),     # 1万-10万美元
+                'ETH/USDT': (500, 10000),        # 500-1万美元  
+                'SOL/USDT': (10, 1000),          # 10-1000美元
+                'BNB/USDT': (100, 1000),         # 100-1000美元
+                'ADA/USDT': (0.1, 10),           # 0.1-10美元
+                'DOT/USDT': (1, 100),            # 1-100美元
+                'AVAX/USDT': (5, 500),           # 5-500美元
+                'LINK/USDT': (5, 100),           # 5-100美元
+                'MATIC/USDT': (0.1, 10)          # 0.1-10美元
+            }
+            
+            if symbol in reasonable_ranges:
+                min_price, max_price = reasonable_ranges[symbol]
+                return min_price <= current_price <= max_price
+            
+            return True  # 未知币种不检查
     
     def get_portfolio_status(self):
         total_position_value = sum(pos['position_size'] for pos in self.active_positions.values())

@@ -82,21 +82,19 @@ class RobustSMAStrategy(BaseStrategy):
         if fast_ma > slow_ma * 1.001:
             print(f"🎯 生成买入信号! 快速MA({fast_ma:.2f}) > 慢速MA({slow_ma:.2f})")
             return TradingSignal(
-                symbol=symbol,
-                signal_type=SignalType.BUY,
-                strength=min(signal_strength * 10, 1.0),
-                price=current_price,
+                symbol=market_data.symbol,
+                action="BUY",
+                confidence=confidence,
                 timestamp=market_data.timestamp
             )
         elif fast_ma < slow_ma * 0.999:
             print(f"🎯 生成卖出信号! 快速MA({fast_ma:.2f}) < 慢速MA({slow_ma:.2f})")
             return TradingSignal(
-                symbol=symbol,
-                signal_type=SignalType.SELL,
-                strength=min(signal_strength * 10, 1.0),
-                price=current_price,
+                symbol=market_data.symbol,
+                action="SELL",
+                confidence=confidence,
                 timestamp=market_data.timestamp
-            )
+        )
         
         return None
     
