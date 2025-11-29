@@ -1,135 +1,123 @@
-# real_market_data.py
 import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime, timedelta
 
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
+
+
+# ================================================================
+#                    真实市场数据接口（最终优化版）
+# ================================================================
 class RealMarketData:
-    """真实市场数据接口"""
-    
+    """真实市场数据接口（含 Binance API + 本地缓存 + 模拟数据）"""
+
     def __init__(self):
-        self.symbols = ['BTC-USDT', 'ETH-USDT', 'ADA-USDT']
-    
-    def get_binance_data(self, symbol: str, interval: str = '5m', limit: int = 100):
-        """获取币安数据（模拟版本）"""
-        print(f"获取 {symbol} 市场数据...")
-        
-        # 模拟真实数据获取（实际使用时替换为真实API）
+        self.cache = {}  # 避免重复下载
+        self.session = requests.Session()
+
+    # ------------------------------------------------------------
+    # 🔹 方法1：下载 Binance 真实K线
+    # ------------------------------------------------------------
+    def get_recent_klines(self, symbol: str, interval="1h", days=30) -> pd.DataFrame:
+        """
+        下载 Binance K线数据，支持 days 天。
+        """
+        limit = min(days * 24, 1000)   # Binance 单次最多 1000 根
+
+        # 将 BTC/USDT 转换为 Binance API 规范 BTCUSDT
+        api_symbol = symbol.replace("/", "")
+
+        url = f"{BINANCE_URL}?symbol={api_symbol}&interval={interval}&limit={limit}"
+
         try:
-            # 这里应该是真实的API调用
-            # response = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}")
-            # data = response.json()
-            
-            # 模拟数据生成（基于真实市场特征）
-            return self._generate_realistic_market_data(symbol, limit)
-            
+            r = self.session.get(url, timeout=5)
+            data = r.json()
+
+            if isinstance(data, dict) and "code" in data:
+                print(f"⚠️ Binance返回错误: {data}")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(data, columns=[
+                "timestamp", "open", "high", "low", "close",
+                "volume", "_1", "_2", "_3", "_4", "_5", "_6"
+            ])
+
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df["open"] = df["open"].astype(float)
+            df["high"] = df["high"].astype(float)
+            df["low"] = df["low"].astype(float)
+            df["close"] = df["close"].astype(float)
+            df["volume"] = df["volume"].astype(float)
+
+            df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+            df.sort_values("timestamp", inplace=True)
+            df.reset_index(drop=True, inplace=True)
+
+            print(f"📥 下载真实K线成功: {symbol}, {len(df)} 行")
+            return df
+
         except Exception as e:
-            print(f"数据获取失败: {e}")
-            return self._generate_realistic_market_data(symbol, limit)
-    
-    
-    def load_for_smart_backtest(symbol: str, days: int) -> pd.DataFrame:
-    
-
-    # 下面这部分，请你用你原来真实数据的接口来填
-    # 举例：如果你之前是这样：
-    # rm = RealMarketData()
-    # df = rm.get_recent_klines(symbol, interval="1h", days=days)
-    # 那么就把那一套写进来。
-        from real_market_data import RealMarketData  # 如果你本来就有这个类
-
-        rm = RealMarketData()
-        # ===== 这里用你真实存在的方法替换 ↓↓↓ =====
-        df = rm.get_recent_klines(symbol, interval="1h", days=days)
-        # ===== 如果方法名不一样，就改这一行即可 =====
-
-        # 标准化一下列名和顺序
-        if df is None or df.empty:
+            print(f"❌ 下载真实数据失败: {e}")
             return pd.DataFrame()
 
-        # 确保包含所需列，并做简单清洗
-        required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
-        missing = [c for c in required_cols if c not in df.columns]
-        if missing:
-            # 这里可以根据你原来的列名做一次映射，比如:
-            # df.rename(columns={"Open": "open", "Close": "close"}, inplace=True)
-            pass
+    # ------------------------------------------------------------
+    # 🔹 方法2：生成模拟市场数据（备用）
+    # ------------------------------------------------------------
+    def _generate_fake_data(self, symbol: str, limit: int = 500) -> pd.DataFrame:
+        """生成趋势市场 + 随机波动的模拟数据"""
 
-        df = df[required_cols].copy()
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        df.sort_values("timestamp", inplace=True)
-        df.reset_index(drop=True, inplace=True)
-            return dfdef _generate_realistic_market_data(self, symbol: str, limit: int):
-            """生成更真实的市场数据"""
-            np.random.seed(hash(symbol) % 10000)  # 基于symbol的随机种子
-            
-            # 基础价格（根据不同币种）
-            base_prices = {
-                'BTC-USDT': 50000,
-                'ETH-USDT': 3000, 
-                'ADA-USDT': 0.5
-            }
-            base_price = base_prices.get(symbol, 100)
-            
-            # 生成价格序列（带趋势和波动）
-            prices = [base_price]
-            for i in range(1, limit):
-                # 真实市场特征：趋势 + 随机波动 + 偶尔大幅波动
-                trend = np.random.normal(0, 0.002)  # 微小趋势
-                noise = np.random.normal(0, 0.01)   # 日常波动
-                jump = 0
-                
-                # 5%的概率出现大幅波动
-                if np.random.random() < 0.05:
-                    jump = np.random.normal(0, 0.05)
-                
-                price_change = trend + noise + jump
-                new_price = prices[-1] * (1 + price_change)
-                prices.append(max(new_price, base_price * 0.1))  # 防止价格归零
-            
-            # 创建DataFrame
-            data = pd.DataFrame({
-                'timestamp': [datetime.now() - timedelta(minutes=5*i) for i in range(limit)][::-1],
-                'open': prices,
-                'high': [p * (1 + abs(np.random.normal(0, 0.005))) for p in prices],
-                'low': [p * (1 - abs(np.random.normal(0, 0.005))) for p in prices],
-                'close': prices,
-                'volume': [np.random.randint(1000, 100000) for _ in prices]
-            })
-            
-            data.set_index('timestamp', inplace=True)
-            return data
-    
-    def get_multiple_symbols_data(self, symbols: list = None):
-        """获取多个币种数据"""
-        if symbols is None:
-            symbols = self.symbols
-        
-        all_data = {}
-        for symbol in symbols:
-            data = self.get_binance_data(symbol)
-            all_data[symbol] = data
-        
-        return all_data
+        base_prices = {
+            "BTC/USDT": 50000,
+            "ETH/USDT": 3000,
+            "SOL/USDT": 150,
+            "ADA/USDT": 0.5
+        }
 
-def test_real_market_data():
-    """测试真实市场数据"""
-    print("测试真实市场数据接口...")
-    
-    market_data = RealMarketData()
-    
-    # 获取BTC数据
-    btc_data = market_data.get_binance_data('BTC-USDT', limit=50)
-    print(f"BTC数据形状: {btc_data.shape}")
-    print(f"BTC价格范围: {btc_data['close'].min():.2f} - {btc_data['close'].max():.2f}")
-    
-    # 获取多个币种数据
-    multi_data = market_data.get_multiple_symbols_data(['BTC-USDT', 'ETH-USDT'])
-    print(f"\n多币种数据:")
-    for symbol, data in multi_data.items():
-        print(f"  {symbol}: {len(data)} 条记录")
-    
-    return market_data
+        base = base_prices.get(symbol, 100)
 
+        prices = [base]
+        for i in range(limit - 1):
+            drift = np.random.normal(0, 0.002)
+            noise = np.random.normal(0, 0.01)
+            jump = np.random.normal(0, 0.04) if np.random.rand() < 0.03 else 0
+            prices.append(prices[-1] * (1 + drift + noise + jump))
+
+        df = pd.DataFrame({
+            "timestamp": [datetime.now() - timedelta(minutes=5 * i) for i in range(limit)][::-1],
+            "open": prices,
+            "high": [p * (1 + np.random.rand() * 0.01) for p in prices],
+            "low": [p * (1 - np.random.rand() * 0.01) for p in prices],
+            "close": prices,
+            "volume": np.random.randint(1000, 100000, size=limit)
+        })
+
+        print(f"📊 使用模拟市场数据: {symbol} ({limit}行)")
+        return df
+
+    # ------------------------------------------------------------
+    # 🔹 方法3：smart_backtest 专用接口
+    # ------------------------------------------------------------
+    def load_for_smart_backtest(self, symbol: str, days: int) -> pd.DataFrame:
+        """
+        回测专用数据接口：尝试真实数据 → 否则 fallback 模拟数据
+        """
+        # 1. 尝试从真实市场拿数据
+        df = self.get_recent_klines(symbol, interval="5m", days=days)
+
+        if df is not None and not df.empty:
+            return df
+
+        # 2. 不行则 fallback 模拟数据
+        print(f"⚠️ 使用 fallback 模拟数据: {symbol}")
+        return self._generate_fake_data(symbol, limit=days * 24 * 12)
+
+
+# ================================================================
+#                     测试入口（可选）
+# ================================================================
 if __name__ == "__main__":
-    test_real_market_data()
+    rm = RealMarketData()
+    df = rm.load_for_smart_backtest("BTC/USDT", 30)
+    print(df.head())
+    print(df.tail())
