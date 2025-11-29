@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/ai_enhanced_backtest_with_progress.py
 """
 高频交易回测系统 - 纯Python进度条版本
 不依赖外部库，内置进度显示
