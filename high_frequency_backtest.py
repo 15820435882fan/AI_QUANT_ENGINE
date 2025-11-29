@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
-高频交易回测系统 - AI优化增强版本
-集成AI策略优化和详细报告系统
+high_frequency_backtest.py
+
+高频交易回测系统 - 简化可工作版本 + 结果分析/打分
+适合用来做：
+- 信号管线是否能跑通；
+- 各币种大致表现的对比；
+- 给 AI/人类一个大概的“好坏点评”。
+
+注意：
+真正的实战策略评估（Sharpe / 回撤 / 因子分析）建议放到 smart_backtest 里做。
 """
 
 import os
@@ -10,650 +18,489 @@ import pandas as pd
 import numpy as np
 import logging
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import List, Dict, Any
+
 import warnings
-from typing import Dict, List, Any
-import json
-warnings.filterwarnings('ignore')
 
-# 设置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('AIEnhancedBacktest')
+warnings.filterwarnings("ignore")
 
-class AIStrategyOptimizer:
-    """AI策略优化器"""
-    
-    def __init__(self):
-        self.optimization_history = []
-    
-    def optimize_signal_parameters(self, historical_data, symbol):
-        """优化信号参数 - 使用遗传算法思想"""
-        best_params = {
-            'rsi_oversold': 30,
-            'rsi_overbought': 70,
-            'macd_threshold': 0.2,
-            'bb_threshold': 0.1,
-            'volume_threshold': 1.5,
-            'min_signal_strength': 0.6
-        }
-        
-        # 分析历史数据特征
-        if len(historical_data) > 100:
-            returns = historical_data['close'].pct_change().dropna()
-            volatility = returns.std()
-            trend_strength = abs(historical_data['close'].pct_change(20).mean())
-            
-            # 基于市场特征调整参数
-            if volatility > 0.02:  # 高波动市场
-                best_params['min_signal_strength'] = 0.7
-                best_params['macd_threshold'] = 0.3
-            elif volatility < 0.01:  # 低波动市场
-                best_params['min_signal_strength'] = 0.5
-                best_params['macd_threshold'] = 0.15
-            
-            if trend_strength > 0.001:  # 强趋势市场
-                best_params['rsi_oversold'] = 35
-                best_params['rsi_overbought'] = 65
-        
-        logger.info(f"🤖 AI优化 {symbol} 参数: {best_params}")
-        return best_params
+# 日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("HighFrequencyBacktest")
 
-class EnhancedSignalDetector:
-    """增强信号检测器 - 集成AI优化"""
-    
-    def __init__(self):
-        self.ai_optimizer = AIStrategyOptimizer()
-        self.symbol_params = {}
-    
-    def analyze_enhanced_signals(self, data, symbol):
-        """分析增强信号 - AI优化版本"""
+
+class SimpleSignalDetector:
+    """简化信号检测器 - 只保证“有信号，可回测”"""
+
+    def analyze_enhanced_signals(self, data: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """
+        返回一个 DataFrame:
+        - signal_strength: [-1, 1]
+        - signal_type: STRONG_BUY/BUY/SELL/STRONG_SELL/HOLD
+        """
         try:
-            if data is None or len(data) < 50:
+            if data is None or len(data) < 20 or "close" not in data.columns:
                 return pd.DataFrame()
-            
-            # 获取AI优化参数
-            if symbol not in self.symbol_params:
-                self.symbol_params[symbol] = self.ai_optimizer.optimize_signal_parameters(data, symbol)
-            
-            params = self.symbol_params[symbol]
-            
-            # 计算技术指标
-            df = self._calculate_enhanced_indicators(data)
-            
-            # 生成AI优化信号
-            signals = self._generate_ai_optimized_signals(df, params)
-            
-            return signals
-            
-        except Exception as e:
-            logger.error(f"AI信号分析错误: {e}")
-            return pd.DataFrame()
-    
-    def _calculate_enhanced_indicators(self, df):
-        """计算增强技术指标"""
-        # RSI
-        df['rsi'] = self._calculate_rsi(df['close'])
-        
-        # MACD
-        df['macd'], df['macd_signal'], df['macd_hist'] = self._calculate_macd(df['close'])
-        
-        # 布林带
-        df['bb_upper'], df['bb_middle'], df['bb_lower'] = self._calculate_bollinger_bands(df['close'])
-        
-        # 移动平均线
-        df['sma_10'] = df['close'].rolling(window=10).mean()
-        df['sma_30'] = df['close'].rolling(window=30).mean()
-        df['sma_50'] = df['close'].rolling(window=50).mean()
-        
-        # 价格动量
-        df['momentum_5'] = df['close'].pct_change(5)
-        df['momentum_10'] = df['close'].pct_change(10)
-        
-        # 成交量分析（如果有成交量数据）
-        if 'volume' in df.columns:
-            df['volume_sma'] = df['volume'].rolling(window=20).mean()
-            df['volume_ratio'] = df['volume'] / df['volume_sma']
-        else:
-            df['volume_ratio'] = 1.0
-        
-        # 波动率
-        df['volatility'] = df['close'].pct_change().rolling(window=20).std()
-        
-        return df
-    
-    def _calculate_rsi(self, prices, period=14):
-        """计算RSI"""
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
-    
-    def _calculate_macd(self, prices, fast=12, slow=26, signal=9):
-        """计算MACD"""
-        ema_fast = prices.ewm(span=fast).mean()
-        ema_slow = prices.ewm(span=slow).mean()
-        macd = ema_fast - ema_slow
-        macd_signal = macd.ewm(span=signal).mean()
-        macd_hist = macd - macd_signal
-        return macd, macd_signal, macd_hist
-    
-    def _calculate_bollinger_bands(self, prices, period=20, std_dev=2):
-        """计算布林带"""
-        middle = prices.rolling(window=period).mean()
-        std = prices.rolling(window=period).std()
-        upper = middle + (std * std_dev)
-        lower = middle - (std * std_dev)
-        return upper, middle, lower
-    
-    def _generate_ai_optimized_signals(self, df, params):
-        """生成AI优化信号"""
-        signals = []
-        
-        for i in range(len(df)):
-            if i < 50:  # 确保有足够数据计算指标
-                signals.append({
-                    'signal_strength': 0, 
-                    'signal_type': 'HOLD',
-                    'confidence': 0,
-                    'rsi': 50,
-                    'macd_hist': 0,
-                    'bb_position': 0
-                })
-                continue
-                
-            row = df.iloc[i]
-            signal_strength = 0
-            confidence_factors = []
-            
-            # 1. RSI信号 (权重: 0.3)
-            rsi_signal = 0
-            if row['rsi'] < params['rsi_oversold']:
-                rsi_signal = 0.3
-                confidence_factors.append(('RSI超卖', 0.8))
-            elif row['rsi'] > params['rsi_overbought']:
-                rsi_signal = -0.3
-                confidence_factors.append(('RSI超买', 0.8))
-            signal_strength += rsi_signal
-            
-            # 2. MACD信号 (权重: 0.3)
-            macd_signal = 0
-            if row['macd_hist'] > params['macd_threshold']:
-                macd_signal = 0.3
-                confidence_factors.append(('MACD金叉', 0.7))
-            elif row['macd_hist'] < -params['macd_threshold']:
-                macd_signal = -0.3
-                confidence_factors.append(('MACD死叉', 0.7))
-            signal_strength += macd_signal
-            
-            # 3. 布林带信号 (权重: 0.2)
-            bb_signal = 0
-            bb_position = (row['close'] - row['bb_lower']) / (row['bb_upper'] - row['bb_lower'])
-            if bb_position < 0.1:  # 接近下轨
-                bb_signal = 0.2
-                confidence_factors.append(('布林带下轨', 0.6))
-            elif bb_position > 0.9:  # 接近上轨
-                bb_signal = -0.2
-                confidence_factors.append(('布林带上轨', 0.6))
-            signal_strength += bb_signal
-            
-            # 4. 移动平均线信号 (权重: 0.2)
-            ma_signal = 0
-            if row['sma_10'] > row['sma_30'] > row['sma_50']:
-                ma_signal = 0.2
-                confidence_factors.append(('多头排列', 0.9))
-            elif row['sma_10'] < row['sma_30'] < row['sma_50']:
-                ma_signal = -0.2
-                confidence_factors.append(('空头排列', 0.9))
-            signal_strength += ma_signal
-            
-            # 计算置信度
-            confidence = np.mean([cf[1] for cf in confidence_factors]) if confidence_factors else 0
-            
-            # 确定信号类型
-            if signal_strength > params['min_signal_strength'] and confidence > 0.6:
-                signal_type = 'STRONG_BUY'
-            elif signal_strength > 0.3:
-                signal_type = 'BUY'
-            elif signal_strength < -params['min_signal_strength'] and confidence > 0.6:
-                signal_type = 'STRONG_SELL'
-            elif signal_strength < -0.3:
-                signal_type = 'SELL'
-            else:
-                signal_type = 'HOLD'
-            
-            signals.append({
-                'signal_strength': signal_strength,
-                'signal_type': signal_type,
-                'confidence': confidence,
-                'rsi': row['rsi'],
-                'macd_hist': row['macd_hist'],
-                'bb_position': bb_position,
-                'factors': [cf[0] for cf in confidence_factors]
-            })
-        
-        return pd.DataFrame(signals)
 
-class AdvancedBacktest:
-    """高级回测系统 - 集成AI优化和详细报告"""
-    
-    def __init__(self, initial_capital=10000, compound_mode=True, leverage=3):
+            signals = []
+            closes = data["close"].values
+
+            for i in range(len(data)):
+                if i < 20:
+                    signals.append({"signal_strength": 0.0, "signal_type": "HOLD"})
+                    continue
+
+                current_price = closes[i]
+                sma_short = np.mean(closes[i - 5 : i])
+                sma_long = np.mean(closes[i - 20 : i])
+
+                if sma_short > sma_long and current_price > sma_short:
+                    strength = 0.8
+                    stype = "STRONG_BUY"
+                elif sma_short < sma_long and current_price < sma_short:
+                    strength = -0.8
+                    stype = "STRONG_SELL"
+                elif sma_short > sma_long:
+                    strength = 0.3
+                    stype = "BUY"
+                elif sma_short < sma_long:
+                    strength = -0.3
+                    stype = "SELL"
+                else:
+                    strength = 0.0
+                    stype = "HOLD"
+
+                signals.append({"signal_strength": strength, "signal_type": stype})
+
+            return pd.DataFrame(signals)
+
+        except Exception as e:
+            logger.error(f"信号分析错误 [{symbol}]: {e}")
+            return pd.DataFrame()
+
+
+class HighFrequencyBacktest:
+    """高频交易回测系统（简化版）"""
+
+    def __init__(
+        self,
+        initial_capital: float = 10_000.0,
+        compound_mode: bool = True,
+        leverage: float = 3.0,
+        signal_detector: SimpleSignalDetector | None = None,
+    ):
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
         self.compound_mode = compound_mode
         self.leverage = leverage
-        self.positions = {}
-        self.trade_history = []
-        self.performance_metrics = {}
-        
-        # 使用AI增强信号检测器
-        self.signal_detector = EnhancedSignalDetector()
-        
-        logger.info("🚀 AI增强回测系统初始化完成")
-    
-    def run_advanced_backtest(self, symbols, days=30):
-        """运行高级回测"""
-        logger.info(f"🎯 开始AI优化回测: {symbols} {days}天")
-        
-        all_results = []
-        detailed_trades = []
-        
-        for symbol in symbols:
-            logger.info(f"\n🔍 AI优化测试: {symbol}")
-            
-            try:
-                # 生成模拟数据
-                data = self._generate_realistic_data(symbol, days)
-                logger.info(f"✅ 生成 {symbol} 数据: {len(data)} 条")
-                
-                # 运行AI优化回测
-                result = self._run_ai_optimized_backtest(symbol, data)
-                all_results.append(result)
-                detailed_trades.extend(result['detailed_trades'])
-                
-            except Exception as e:
-                logger.error(f"❌ {symbol} AI回测失败: {e}")
-                continue
-        
-        # 生成详细报告
-        self._generate_detailed_report(all_results, detailed_trades)
-        return all_results
-    
-    def _generate_realistic_data(self, symbol, days):
-        """生成更真实的市场数据"""
-        dates = pd.date_range(end=datetime.now(), periods=days*24, freq='H')
-        
-        base_prices = {
-            'BTC/USDT': 35000, 'ETH/USDT': 2500, 'SOL/USDT': 100,
-            'BNB/USDT': 300, 'ADA/USDT': 0.5, 'DOT/USDT': 6,
-            'AVAX/USDT': 20, 'LINK/USDT': 15, 'MATIC/USDT': 0.8
+
+        # 这里保留为对象属性，但每次单币种回测内部会自己维护局部 state
+        self.positions: Dict[str, dict] = {}
+        self.trade_history: List[dict] = []
+
+        self.signal_detector = signal_detector or SimpleSignalDetector()
+
+        # “合理价格”区间只是为了防止生成出离谱数据（调试用）
+        self.reasonable_price_ranges = {
+            "BTC/USDT": (15_000, 80_000),
+            "ETH/USDT": (800, 5_000),
+            "SOL/USDT": (10, 300),
+            "BNB/USDT": (100, 800),
+            "ADA/USDT": (0.2, 3),
+            "DOT/USDT": (2, 50),
+            "AVAX/USDT": (5, 100),
+            "LINK/USDT": (3, 50),
+            "MATIC/USDT": (0.3, 3),
         }
-        
-        base_price = base_prices.get(symbol, 100)
-        
-        # 生成更真实的价格序列（包含趋势和波动）
+
+        logger.info("🚀 高频回测系统初始化完成 - 简化可工作版本")
+
+    # ------------------------------------------------------------------ #
+    # 数据生成（如果你有真实数据，可以自行替换成读取 CSV / API）
+    # ------------------------------------------------------------------ #
+    def _generate_sample_data(self, symbol: str, days: int) -> pd.DataFrame:
+        """生成简单但不离谱的模拟 OHLCV 数据"""
+        dates = pd.date_range(end=datetime.now(), periods=days * 24, freq="H")
+
+        base_prices = {
+            "BTC/USDT": 35_000,
+            "ETH/USDT": 2_500,
+            "SOL/USDT": 100,
+            "BNB/USDT": 300,
+            "ADA/USDT": 0.5,
+            "DOT/USDT": 6,
+            "AVAX/USDT": 20,
+            "LINK/USDT": 15,
+            "MATIC/USDT": 0.8,
+        }
+
+        base_price = base_prices.get(symbol, 100.0)
+
         np.random.seed(42)
-        n_points = len(dates)
-        
-        # 创建趋势成分
-        trend = np.linspace(0, 0.1, n_points)  # 10%的上升趋势
-        
-        # 创建周期性成分
-        cycle = 0.05 * np.sin(2 * np.pi * np.arange(n_points) / (24*7))  # 每周期的波动
-        
-        # 随机波动
-        noise = np.random.normal(0, 0.01, n_points)
-        
-        # 组合所有成分
-        returns = trend + cycle + noise
+        # 简单随机游走：日化波动控制在合理范围
+        returns = np.random.normal(0.0002, 0.015, len(dates))
         prices = base_price * (1 + returns).cumprod()
-        
-        # 生成成交量（与价格波动相关）
-        volume_base = 100000
-        volume_variation = np.abs(returns) * 500000
-        volumes = volume_base + volume_variation + np.random.uniform(-20000, 20000, n_points)
-        
-        data = pd.DataFrame({
-            'timestamp': dates,
-            'open': prices * 0.998,
-            'high': prices * 1.005,
-            'low': prices * 0.995, 
-            'close': prices,
-            'volume': volumes
-        })
-        
+
+        data = pd.DataFrame(
+            {
+                "timestamp": dates,
+                "open": prices * 0.998,
+                "high": prices * 1.005,
+                "low": prices * 0.995,
+                "close": prices,
+                "volume": np.random.uniform(10_000, 500_000, len(dates)),
+            }
+        )
+
         return data
-    
-    def _run_ai_optimized_backtest(self, symbol, data):
-        """运行AI优化回测"""
-        trades = []
-        portfolio_values = []
-        current_value = self.current_capital
-        
-        for i in range(50, len(data)):  # 从50开始确保有足够数据
+
+    # ------------------------------------------------------------------ #
+    # 回测主流程
+    # ------------------------------------------------------------------ #
+    def run_backtest(
+        self, symbols: List[str], days: int = 30, test_full_year: bool = False
+    ) -> List[Dict[str, Any]]:
+        """运行多币种回测 - 返回每个币种的统计结果"""
+        logger.info(f"🎯 开始回测: {symbols}，天数={days}")
+
+        all_results: List[Dict[str, Any]] = []
+
+        for symbol in symbols:
+            logger.info(f"\n🔍 测试币种: {symbol}")
+
+            try:
+                data = self._generate_sample_data(symbol, days)
+                logger.info(f"✅ 生成 {symbol} 模拟数据: {len(data)} 条")
+
+                result = self._backtest_single_symbol(symbol, data)
+                all_results.append(result)
+
+            except Exception as e:
+                logger.error(f"❌ {symbol} 回测失败: {e}")
+                continue
+
+        self._generate_report(all_results)
+        self._analyze_results(all_results)
+
+        return all_results
+
+    def _backtest_single_symbol(
+        self, symbol: str, data: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """单币种回测（局部 state，避免串币种污染）"""
+        symbol_positions: Dict[str, dict] = {}
+        symbol_trades: List[dict] = []
+
+        current_capital = self.initial_capital
+
+        for i in range(50, len(data)):
             try:
                 row = data.iloc[i]
-                current_price = row['close']
-                current_time = row['timestamp']
-                
-                # 获取AI优化信号
-                signal_data = data.iloc[:i+1]
-                signals = self.signal_detector.analyze_enhanced_signals(signal_data, symbol)
-                
-                if not signals.empty and i < len(signals):
-                    signal = signals.iloc[i]
-                    
-                    # 执行AI优化交易
-                    trade_result = self._execute_ai_trading(
-                        symbol, current_price, current_time, signal
-                    )
-                    
-                    if trade_result:
-                        trades.append(trade_result)
-                        
-                        # 更新投资组合价值
-                        if symbol in self.positions:
-                            position = self.positions[symbol]
-                            if position['type'] == 'long':
-                                position_value = position['size'] * (current_price / position['entry_price']) * self.leverage
-                            else:
-                                position_value = position['size'] * (position['entry_price'] / current_price) * self.leverage
-                            current_value = self.current_capital + position_value
-                        else:
-                            current_value = self.current_capital
-                        
-                        portfolio_values.append({
-                            'timestamp': current_time,
-                            'portfolio_value': current_value,
-                            'price': current_price
-                        })
-                        
+                current_price = float(row["close"])
+                current_time = row["timestamp"]
+
+                signal_data = data.iloc[: i + 1]
+                signals = self.signal_detector.analyze_enhanced_signals(
+                    signal_data, symbol
+                )
+
+                if signals.empty or i >= len(signals):
+                    continue
+
+                signal_row = signals.iloc[i]
+                signal_strength = float(signal_row.get("signal_strength", 0.0))
+
+                trade_result, current_capital = self._execute_trading_logic(
+                    symbol,
+                    current_price,
+                    current_time,
+                    signal_strength,
+                    symbol_positions,
+                    current_capital,
+                )
+
+                if trade_result:
+                    symbol_trades.append(trade_result)
+
             except Exception as e:
                 logger.error(f"❌ {symbol} 回测迭代错误: {e}")
                 continue
-        
-        # 计算性能指标
-        metrics = self._calculate_performance_metrics(trades, portfolio_values)
-        
+
+        # 统计结果
+        total_pnl = sum(t.get("pnl", 0.0) for t in symbol_trades)
+        metrics = self._evaluate_symbol_trades(
+            symbol_trades, initial_capital=self.initial_capital
+        )
+
         return {
-            'symbol': symbol,
-            'trades': trades,
-            'metrics': metrics,
-            'detailed_trades': trades,
-            'portfolio_history': portfolio_values
-        }
-    
-    def _execute_ai_trading(self, symbol, price, timestamp, signal):
-        """执行AI优化交易"""
-        try:
-            signal_strength = signal.get('signal_strength', 0)
-            confidence = signal.get('confidence', 0)
-            signal_type = signal.get('signal_type', 'HOLD')
-            
-            # 只有高置信度的强信号才交易
-            min_confidence = 0.6
-            min_strength = 0.6
-            
-            # 开仓逻辑
-            if (signal_type in ['STRONG_BUY', 'STRONG_SELL'] and 
-                confidence >= min_confidence and 
-                abs(signal_strength) >= min_strength and 
-                symbol not in self.positions):
-                
-                position_size = self.current_capital * 0.08  # 8%仓位，更保守
-                
-                if signal_type == 'STRONG_BUY':
-                    # 开多头
-                    self.positions[symbol] = {
-                        'type': 'long',
-                        'entry_price': price,
-                        'size': position_size,
-                        'timestamp': timestamp,
-                        'signal_strength': signal_strength,
-                        'confidence': confidence
-                    }
-                    
-                    return {
-                        'symbol': symbol, 'timestamp': timestamp,
-                        'action': 'BUY', 'price': price,
-                        'size': position_size, 'type': 'long',
-                        'signal_strength': signal_strength,
-                        'confidence': confidence,
-                        'signal_factors': signal.get('factors', [])
-                    }
-                    
-                else:  # STRONG_SELL
-                    # 开空头
-                    self.positions[symbol] = {
-                        'type': 'short', 
-                        'entry_price': price,
-                        'size': position_size,
-                        'timestamp': timestamp,
-                        'signal_strength': signal_strength,
-                        'confidence': confidence
-                    }
-                    
-                    return {
-                        'symbol': symbol, 'timestamp': timestamp,
-                        'action': 'SELL', 'price': price,
-                        'size': position_size, 'type': 'short',
-                        'signal_strength': signal_strength,
-                        'confidence': confidence,
-                        'signal_factors': signal.get('factors', [])
-                    }
-            
-            # 平仓逻辑
-            elif symbol in self.positions:
-                position = self.positions[symbol]
-                hold_hours = (timestamp - position['timestamp']).total_seconds() / 3600
-                
-                # AI优化平仓条件
-                should_close = False
-                close_reason = ""
-                
-                if position['type'] == 'long':
-                    if signal_type == 'STRONG_SELL' and confidence > 0.7:
-                        should_close = True
-                        close_reason = "强烈卖出信号"
-                    elif hold_hours > 24:  # 最大持有时间
-                        should_close = True
-                        close_reason = "时间止损"
-                    elif signal_strength < -0.4:  # 信号反转
-                        should_close = True
-                        close_reason = "信号反转"
-                        
-                else:  # short position
-                    if signal_type == 'STRONG_BUY' and confidence > 0.7:
-                        should_close = True
-                        close_reason = "强烈买入信号"
-                    elif hold_hours > 24:
-                        should_close = True
-                        close_reason = "时间止损"
-                    elif signal_strength > 0.4:
-                        should_close = True
-                        close_reason = "信号反转"
-                
-                if should_close:
-                    # 计算盈亏
-                    if position['type'] == 'long':
-                        pnl = (price - position['entry_price']) / position['entry_price'] * position['size'] * self.leverage
-                    else:
-                        pnl = (position['entry_price'] - price) / position['entry_price'] * position['size'] * self.leverage
-                    
-                    trade = {
-                        'symbol': symbol, 'timestamp': timestamp,
-                        'action': 'CLOSE', 'price': price,
-                        'pnl': pnl, 'type': position['type'],
-                        'hold_hours': hold_hours,
-                        'close_reason': close_reason,
-                        'signal_strength': signal_strength,
-                        'confidence': confidence,
-                        'entry_signal_strength': position.get('signal_strength', 0),
-                        'entry_confidence': position.get('confidence', 0)
-                    }
-                    
-                    self.current_capital += pnl
-                    del self.positions[symbol]
-                    return trade
-                    
-        except Exception as e:
-            logger.error(f"AI交易执行错误 {symbol}: {e}")
-            
-        return None
-    
-    def _calculate_performance_metrics(self, trades, portfolio_history):
-        """计算详细的性能指标"""
-        if not trades:
-            return {}
-        
-        # 基础指标
-        total_trades = len(trades)
-        profitable_trades = [t for t in trades if t.get('pnl', 0) > 0]
-        losing_trades = [t for t in trades if t.get('pnl', 0) < 0]
-        
-        win_rate = len(profitable_trades) / total_trades * 100
-        total_pnl = sum(t.get('pnl', 0) for t in trades)
-        avg_profit = total_pnl / total_trades
-        
-        # 盈亏分析
-        total_profits = sum(t.get('pnl', 0) for t in profitable_trades)
-        total_losses = sum(t.get('pnl', 0) for t in losing_trades)
-        profit_factor = abs(total_profits / total_losses) if total_losses != 0 else float('inf')
-        
-        # 持仓时间分析
-        hold_times = [t.get('hold_hours', 0) for t in trades if t.get('hold_hours')]
-        avg_hold_time = np.mean(hold_times) if hold_times else 0
-        
-        # 信号质量分析
-        winning_signals = [t.get('entry_signal_strength', 0) for t in profitable_trades]
-        losing_signals = [t.get('entry_signal_strength', 0) for t in losing_trades]
-        avg_win_signal = np.mean(winning_signals) if winning_signals else 0
-        avg_loss_signal = np.mean(losing_signals) if losing_signals else 0
-        
-        return {
-            'total_trades': total_trades,
-            'win_rate': win_rate,
-            'total_pnl': total_pnl,
-            'avg_profit': avg_profit,
-            'profit_factor': profit_factor,
-            'avg_hold_time_hours': avg_hold_time,
-            'total_profits': total_profits,
-            'total_losses': total_losses,
-            'avg_win_signal': avg_win_signal,
-            'avg_loss_signal': avg_loss_signal,
-            'best_trade': max(trades, key=lambda x: x.get('pnl', 0)) if trades else None,
-            'worst_trade': min(trades, key=lambda x: x.get('pnl', 0)) if trades else None
-        }
-    
-    def _generate_detailed_report(self, all_results, detailed_trades):
-        """生成详细报告"""
-        logger.info("\n" + "="*100)
-        logger.info("🎯 AI增强量化交易系统 - 详细回测报告")
-        logger.info("="*100)
-        
-        # 总体统计
-        total_metrics = self._calculate_total_metrics(all_results)
-        
-        logger.info(f"\n📈 总体性能汇总:")
-        logger.info(f"  🌐 测试币种: {len(all_results)}个")
-        logger.info(f"  📊 总交易次数: {total_metrics['total_trades']}笔")
-        logger.info(f"  🎯 平均胜率: {total_metrics['avg_win_rate']:.1f}%")
-        logger.info(f"  💰 总收益: ${total_metrics['total_pnl']:+,.2f}")
-        logger.info(f"  📈 平均每笔收益: ${total_metrics['avg_profit_per_trade']:+.2f}")
-        logger.info(f"  ⚖️  盈亏比: {total_metrics['profit_factor']:.2f}")
-        logger.info(f"  ⏱️  平均持仓时间: {total_metrics['avg_hold_time']:.1f}小时")
-        
-        # 币种详细表现
-        logger.info(f"\n📊 各币种详细表现:")
-        logger.info("币种          交易数    胜率     总收益      平均收益   盈亏比   持仓时间")
-        logger.info("-" * 90)
-        
-        for result in all_results:
-            symbol = result['symbol']
-            metrics = result['metrics']
-            trades = result['trades']
-            
-            if trades:
-                logger.info(f"{symbol:12} {metrics['total_trades']:6}   {metrics['win_rate']:5.1f}%   ${metrics['total_pnl']:8.2f}   ${metrics['avg_profit']:7.2f}   {metrics['profit_factor']:5.2f}   {metrics['avg_hold_time_hours']:6.1f}h")
-        
-        # AI信号分析
-        logger.info(f"\n🤖 AI信号质量分析:")
-        winning_trades = [t for t in detailed_trades if t.get('pnl', 0) > 0]
-        losing_trades = [t for t in detailed_trades if t.get('pnl', 0) < 0]
-        
-        if winning_trades and losing_trades:
-            avg_win_signal = np.mean([t.get('entry_signal_strength', 0) for t in winning_trades])
-            avg_loss_signal = np.mean([t.get('entry_signal_strength', 0) for t in losing_trades])
-            avg_win_confidence = np.mean([t.get('entry_confidence', 0) for t in winning_trades])
-            avg_loss_confidence = np.mean([t.get('entry_confidence', 0) for t in losing_trades])
-            
-            logger.info(f"  ✅ 盈利交易平均信号强度: {avg_win_signal:.3f} (置信度: {avg_win_confidence:.1%})")
-            logger.info(f"  ❌ 亏损交易平均信号强度: {avg_loss_signal:.3f} (置信度: {avg_loss_confidence:.1%})")
-            logger.info(f"  📊 信号区分度: {abs(avg_win_signal - avg_loss_signal):.3f}")
-        
-        # 交易分布
-        logger.info(f"\n📋 交易分布分析:")
-        pnl_values = [t.get('pnl', 0) for t in detailed_trades]
-        if pnl_values:
-            logger.info(f"  🔺 最大盈利: ${max(pnl_values):.2f}")
-            logger.info(f"  🔻 最大亏损: ${min(pnl_values):.2f}")
-            logger.info(f"  📏 收益标准差: ${np.std(pnl_values):.2f}")
-            logger.info(f"  📈 夏普比率: {np.mean(pnl_values)/np.std(pnl_values) if np.std(pnl_values) > 0 else 0:.2f}")
-        
-        # 建议和改进
-        logger.info(f"\n💡 AI优化建议:")
-        if total_metrics['avg_win_rate'] < 40:
-            logger.info("  🎯 建议: 提高信号阈值，减少低质量交易")
-        if total_metrics['profit_factor'] < 1.5:
-            logger.info("  ⚖️  建议: 优化止损策略，提高盈亏比")
-        if total_metrics['avg_hold_time'] > 48:
-            logger.info("  ⏱️  建议: 缩短持仓时间，提高资金周转率")
-        
-        logger.info(f"\n🎉 AI优化回测完成！")
-        logger.info("="*50)
-    
-    def _calculate_total_metrics(self, all_results):
-        """计算总体指标"""
-        total_trades = sum(len(result['trades']) for result in all_results)
-        total_pnl = sum(result['metrics']['total_pnl'] for result in all_results if result['trades'])
-        
-        win_rates = [result['metrics']['win_rate'] for result in all_results if result['trades']]
-        avg_win_rate = np.mean(win_rates) if win_rates else 0
-        
-        profit_factors = [result['metrics']['profit_factor'] for result in all_results if result['trades']]
-        avg_profit_factor = np.mean(profit_factors) if profit_factors else 0
-        
-        hold_times = [result['metrics']['avg_hold_time_hours'] for result in all_results if result['trades']]
-        avg_hold_time = np.mean(hold_times) if hold_times else 0
-        
-        return {
-            'total_trades': total_trades,
-            'total_pnl': total_pnl,
-            'avg_win_rate': avg_win_rate,
-            'avg_profit_per_trade': total_pnl / total_trades if total_trades > 0 else 0,
-            'profit_factor': avg_profit_factor,
-            'avg_hold_time': avg_hold_time
+            "symbol": symbol,
+            "trades": symbol_trades,
+            "total_trades": len(symbol_trades),
+            "total_pnl": total_pnl,
+            "metrics": metrics,
         }
 
+    def _execute_trading_logic(
+        self,
+        symbol: str,
+        price: float,
+        timestamp: datetime,
+        signal_strength: float,
+        positions: Dict[str, dict],
+        current_capital: float,
+    ):
+        """
+        执行简单交易逻辑：
+        - signal_strength > 0.7 开多
+        - signal_strength < -0.7 开空
+        - 已有仓位则按“持有时间或信号反转”平仓
+        """
+        trade = None
+
+        try:
+            # 开仓逻辑
+            if signal_strength > 0.7 and symbol not in positions:
+                position_size = current_capital * 0.1
+                positions[symbol] = {
+                    "type": "long",
+                    "entry_price": price,
+                    "size": position_size,
+                    "timestamp": timestamp,
+                }
+                trade = {
+                    "symbol": symbol,
+                    "timestamp": timestamp,
+                    "action": "BUY",
+                    "price": price,
+                    "size": position_size,
+                    "type": "long",
+                }
+
+            elif signal_strength < -0.7 and symbol not in positions:
+                position_size = current_capital * 0.1
+                positions[symbol] = {
+                    "type": "short",
+                    "entry_price": price,
+                    "size": position_size,
+                    "timestamp": timestamp,
+                }
+                trade = {
+                    "symbol": symbol,
+                    "timestamp": timestamp,
+                    "action": "SELL",
+                    "price": price,
+                    "size": position_size,
+                    "type": "short",
+                }
+
+            # 平仓逻辑
+            elif symbol in positions:
+                position = positions[symbol]
+                hold_hours = (timestamp - position["timestamp"]).total_seconds() / 3600
+
+                should_close = False
+                if position["type"] == "long" and (
+                    hold_hours > 12 or signal_strength < -0.3
+                ):
+                    should_close = True
+                elif position["type"] == "short" and (
+                    hold_hours > 12 or signal_strength > 0.3
+                ):
+                    should_close = True
+
+                if should_close:
+                    if position["type"] == "long":
+                        pnl = (
+                            (price - position["entry_price"])
+                            / position["entry_price"]
+                            * position["size"]
+                            * self.leverage
+                        )
+                    else:
+                        pnl = (
+                            (position["entry_price"] - price)
+                            / position["entry_price"]
+                            * position["size"]
+                            * self.leverage
+                        )
+
+                    trade = {
+                        "symbol": symbol,
+                        "timestamp": timestamp,
+                        "action": "CLOSE",
+                        "price": price,
+                        "pnl": pnl,
+                        "type": position["type"],
+                        "hold_hours": hold_hours,
+                    }
+
+                    current_capital += pnl
+                    del positions[symbol]
+
+        except Exception as e:
+            logger.error(f"交易执行错误 {symbol}: {e}")
+
+        return trade, current_capital
+
+    # ------------------------------------------------------------------ #
+    # 统计 & 报告
+    # ------------------------------------------------------------------ #
+    def _evaluate_symbol_trades(
+        self, trades: List[dict], initial_capital: float
+    ) -> Dict[str, float]:
+        """对单个币种的交易结果做个简单评价"""
+        if not trades:
+            return {
+                "total_trades": 0,
+                "win_rate": 0.0,
+                "total_pnl": 0.0,
+                "avg_profit": 0.0,
+            }
+
+        pnls = [t.get("pnl", 0.0) for t in trades if "pnl" in t]
+        total_pnl = sum(pnls)
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+
+        win_rate = len(wins) / len(pnls) * 100 if pnls else 0.0
+        avg_profit = total_pnl / len(pnls) if pnls else 0.0
+
+        # 简单 profit_factor
+        loss_sum = abs(sum(losses)) if losses else 0.0
+        profit_sum = sum(wins) if wins else 0.0
+        profit_factor = profit_sum / loss_sum if loss_sum > 0 else float("inf")
+
+        # 简单“收益率”（总 PnL / 初始资金）
+        total_return = total_pnl / initial_capital if initial_capital > 0 else 0.0
+
+        return {
+            "total_trades": len(pnls),
+            "win_rate": win_rate,
+            "total_pnl": total_pnl,
+            "avg_profit": avg_profit,
+            "profit_factor": profit_factor,
+            "total_return": total_return,
+        }
+
+    def _generate_report(self, all_results: List[Dict[str, Any]]):
+        """打印一份简单汇总表"""
+        logger.info("\n" + "=" * 80)
+        logger.info("🎯 高频交易系统 - 回测报告 (简化可工作版本)")
+        logger.info("=" * 80)
+
+        logger.info("\n📊 币种表现统计:")
+        logger.info("币种          交易数    胜率     总收益      平均收益   盈亏比")
+        logger.info("-" * 80)
+
+        total_trades_all = 0
+        total_pnl_all = 0.0
+        win_rates = []
+
+        for result in all_results:
+            symbol = result["symbol"]
+            metrics = result["metrics"]
+            trades = metrics.get("total_trades", 0)
+            win_rate = metrics.get("win_rate", 0.0)
+            total_pnl = metrics.get("total_pnl", 0.0)
+            avg_profit = metrics.get("avg_profit", 0.0)
+            profit_factor = metrics.get("profit_factor", 0.0)
+
+            logger.info(
+                f"{symbol:12} {trades:6d}   {win_rate:5.1f}%   "
+                f"${total_pnl:8.2f}   ${avg_profit:8.2f}   {profit_factor:5.2f}"
+            )
+
+            if trades > 0:
+                total_trades_all += trades
+                total_pnl_all += total_pnl
+                win_rates.append(win_rate)
+
+        if total_trades_all > 0:
+            avg_win_rate = float(np.mean(win_rates)) if win_rates else 0.0
+            logger.info("-" * 80)
+            logger.info(f"📈 总交易次数: {total_trades_all}")
+            logger.info(f"📈 平均胜率: {avg_win_rate:.1f}%")
+            logger.info(f"💰 总收益: ${total_pnl_all:+.2f}")
+            logger.info(
+                f"💰 平均每笔收益: ${total_pnl_all / total_trades_all:+.2f}"
+            )
+        else:
+            logger.info("❌ 没有产生任何交易")
+
+    def _analyze_results(self, all_results: List[Dict[str, Any]]):
+        """
+        “AI 风格”点评一下结果（只是规则逻辑，但方便你一眼看出问题）
+        """
+        logger.info("\n🧠 AI-style 结果分析:")
+
+        if not all_results:
+            logger.info("  没有任何结果，先检查数据或信号生成。")
+            return
+
+        # 找出收益最好的 / 最差的币种
+        valid = [r for r in all_results if r["metrics"]["total_trades"] > 0]
+        if not valid:
+            logger.info("  所有币种都没有交易，说明信号太严格或逻辑有问题。")
+            return
+
+        best = max(valid, key=lambda r: r["metrics"]["total_pnl"])
+        worst = min(valid, key=lambda r: r["metrics"]["total_pnl"])
+
+        logger.info(
+            f"  ✅ 表现最佳: {best['symbol']} | PnL={best['metrics']['total_pnl']:.2f}, "
+            f"WinRate={best['metrics']['win_rate']:.1f}%"
+        )
+        logger.info(
+            f"  ❌ 表现最差: {worst['symbol']} | PnL={worst['metrics']['total_pnl']:.2f}, "
+            f"WinRate={worst['metrics']['win_rate']:.1f}%"
+        )
+
+        # 简单建议
+        for r in valid:
+            symbol = r["symbol"]
+            m = r["metrics"]
+            if m["win_rate"] < 40 and m["profit_factor"] < 1.0:
+                logger.info(
+                    f"  💡 {symbol}: 胜率<40% 且 盈亏比<1，建议："
+                    f"减少交易频率/提高开仓阈值，或在 smart_backtest 中直接淘汰该策略组合。"
+                )
+            elif m["win_rate"] > 55 and m["profit_factor"] > 1.5:
+                logger.info(
+                    f"  🌟 {symbol}: 胜率 & 盈亏比都不错，可以在 smart_backtest 里重点精调参数。"
+                )
+
+
 def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description='AI增强高频交易回测系统')
-    parser.add_argument('--symbols', type=str, default='BTC/USDT,ETH/USDT,SOL/USDT',
-                       help='交易对，用逗号分隔')
-    parser.add_argument('--days', type=int, default=30,
-                       help='回测天数')
-    parser.add_argument('--capital', type=float, default=10000,
-                       help='初始资金')
-    
+    parser = argparse.ArgumentParser(description="高频交易回测系统 - 简化可工作版本")
+    parser.add_argument(
+        "--symbols",
+        type=str,
+        default="BTC/USDT,ETH/USDT,SOL/USDT",
+        help="交易对，用逗号分隔",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="回测天数",
+    )
+    parser.add_argument(
+        "--capital",
+        type=float,
+        default=10_000,
+        help="初始资金",
+    )
+
     args = parser.parse_args()
-    
-    symbols = [s.strip() for s in args.symbols.split(',')]
-    
-    # 创建AI增强回测实例
-    backtest = AdvancedBacktest(initial_capital=args.capital)
-    
-    # 运行AI优化回测
-    backtest.run_advanced_backtest(symbols=symbols, days=args.days)
+    symbols = [s.strip() for s in args.symbols.split(",")]
+
+    backtest = HighFrequencyBacktest(initial_capital=args.capital)
+    backtest.run_backtest(symbols=symbols, days=args.days)
+
 
 if __name__ == "__main__":
     main()
