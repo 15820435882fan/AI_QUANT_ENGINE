@@ -3,11 +3,54 @@
 
 import os
 import logging
+
 from typing import List, Optional
 
 import pandas as pd
+def load_local_kline(symbol: str, interval: str, days: int):
+    """
+    完整修复版：
+    - 兼容 timestamp 在列 或 index 的情况
+    - 强制将 index 转成 DatetimeIndex
+    - 保证切片最近 days 天不会报错
+    """
+    import os
+    import pandas as pd
 
-from real_market_data_v2 import RealMarketData
+    base_dir = "data"
+    exchange = "binance"
+    sym_key = symbol.replace("/", "").upper()
+    fpath = os.path.join(base_dir, exchange, sym_key, f"{interval}.csv")
+
+    if not os.path.exists(fpath):
+        raise FileNotFoundError(f"❌ 本地数据不存在: {fpath}")
+
+    df = pd.read_csv(fpath)
+
+    # 统一处理 timestamp
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.set_index("timestamp")
+    else:
+        # index 模式
+        df.index = pd.to_datetime(df.index, errors="coerce")
+
+    # 必须丢掉无法解析的行
+    df = df[~df.index.isna()]
+
+    # ====== 关键修复：DatetimeIndex 才能切片 ======
+    df.index = pd.DatetimeIndex(df.index)
+
+    # 切片
+    if days is not None and days > 0:
+        end_ts = df.index.max()
+        start_ts = end_ts - pd.Timedelta(days=days)
+        df = df[df.index >= start_ts]
+
+    return df
+
+
+from real_market_data_v3 import RealMarketData
 
 logger = logging.getLogger(__name__)
 

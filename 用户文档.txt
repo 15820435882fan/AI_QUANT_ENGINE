@@ -1,5 +1,7 @@
 markdown
 # 📚 AI量化交易系统使用指南
+下载数据文件：
+python download_all_data.py（需要修改的在这里面修改参数）
 
 ## 快速开始
 1. 启动系统: `python start_production.py`
@@ -62,3 +64,7 @@ production_system = ProductionTradingSystem()
 production_system.add_strategy(
     SimpleMovingAverageStrategy,
     parameters=optimized_strategy  # 使用AI优化的参数！
+
+    下载数据因为有重复，去重的程式
+    python clean_local_data_v2.py
+

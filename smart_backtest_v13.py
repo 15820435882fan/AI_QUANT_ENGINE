@@ -30,7 +30,7 @@ from typing import List, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from real_market_data_v2 import RealMarketData
+from real_market_data_v3 import RealMarketData
 from local_data_engine import LocalDataEngine
 
 logging.basicConfig(
