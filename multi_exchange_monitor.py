@@ -19,9 +19,21 @@ class SniperExchangeMonitor:
         }
         
         # 监控的币种 - 使用常见交易对
-        self.symbols = ['BTC/USDT', 'ETH/USDT', 'ADA/USDT', 'DOT/USDT', 'SOL/USDT']
-        self.volume_threshold = 2.5
-        self.price_threshold = 0.02
+        # 1. 高流动性 2. 波动性适中 3. 交易量大
+        self.symbols = [
+            'BTC/USDT',    # 比特币 - 基准
+            'ETH/USDT',    # 以太坊 - 主流
+            'SOL/USDT',    # Solana - 高波动
+            'ADA/USDT',    # Cardano - 中等市值
+            'DOT/USDT',    # Polkadot - 生态币
+            'AVAX/USDT',   # Avalanche - 新兴公链
+            'LINK/USDT',   # Chainlink - Oracle龙头
+            'MATIC/USDT',  # Polygon - Layer2
+            ]
+        # 刺客出手条件（可调整）
+        self.volume_threshold = 2.8    # 成交量2.8倍异常
+        self.price_threshold = 0.025   # 价格2.5%突破
+        self.min_confidence = 0.72     # 最小置信度72%
         
         self.logger = logging.getLogger('ExchangeMonitor')
         self.logger.info("✅ 多交易所监控器初始化完成")

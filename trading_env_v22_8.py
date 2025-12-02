@@ -1,0 +1,707 @@
+"""
+trading_env_v22_8.py
+
+V22_8: 多周期交易环境 + Train/Valid/Test 数据切分版
+----------------------------------------------------
+在 V22_5 的基础上增加：
+
+1. 数据按时间顺序切分为三段：
+   - segment="train":  前 train_ratio 部分
+   - segment="valid":  中间 valid_ratio 部分
+   - segment="test":   剩余部分
+
+2. 其它逻辑保持与 V22_5 一致：
+   - 多周期 (4h / 1h / 15m) 特征
+   - MTM 账户权益
+   - Reward Shaping 3.0（顺势奖励、逆势惩罚、回撤惩罚等）
+
+该环境专为 V22_8 PPO 训练器使用，支持：
+    - 训练集环境：强化学习训练
+    - 验证集环境：Early Stop / 模型选择
+    - 测试集环境：最终评估
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+INITIAL_CAPITAL = 10_000.0
+TRADING_FEE_RATE = 0.0005  # 单边手续费
+SLIPPAGE_RATE = 0.0002     # 简单滑点
+
+try:
+    from local_data_engine import load_local_kline
+except Exception:
+    def load_local_kline(*args, **kwargs):
+        raise RuntimeError("未找到 local_data_engine.load_local_kline，请确认同目录下存在该文件。")
+
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s"
+    )
+
+
+@dataclass
+class Position:
+    side: int        # -1: short, 0: flat, 1: long
+    leverage: float
+    entry_price: float
+    size: float      # 持仓数量（张数，notional = price * size）
+
+
+def _ensure_ohlc(df: pd.DataFrame) -> pd.DataFrame:
+    """确保 DF 有 open/high/low/close，并按时间索引排序。"""
+    df = df.copy()
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="ignore")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp"])
+        df = df.set_index("timestamp")
+    df = df.sort_index()
+
+    for col in ["open", "high", "low", "close"]:
+        if col not in df.columns:
+            raise ValueError(f"缺少必要列: {col}")
+
+    return df[["open", "high", "low", "close"]].copy()
+
+
+def _calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.rolling(period).mean()
+
+
+def _zscore(series: pd.Series, window: int = 200) -> pd.Series:
+    m = series.rolling(window).mean()
+    s = series.rolling(window).std()
+    return (series - m) / (s + 1e-9)
+
+
+class TradingEnvV22MultiTFV8:
+    """
+    强化学习交易环境（单标的，多周期状态，Reward Shaping 3.0 版 + 数据切分）
+
+    segment:
+        - "train": 使用前 train_ratio 的数据
+        - "valid": 使用中间 valid_ratio 的数据
+        - "test" : 使用剩余部分
+    """
+
+    def __init__(
+        self,
+        symbol: str,
+        days: int = 365,
+        start_index: int = 300,
+        max_steps: Optional[int] = None,
+        segment: str = "train",
+        train_ratio: float = 0.7,
+        valid_ratio: float = 0.2,
+        split_mode: str = "ratio",
+        lookback_months: int = 12,
+        train_months: int = 6,
+        valid_months: int = 1,
+        test_months: int = 5,
+    ):
+        assert segment in ("train", "valid", "test"), f"非法 segment: {segment}"
+        assert 0 < train_ratio < 1 and 0 < valid_ratio < 1 and train_ratio + valid_ratio < 1
+
+        self.symbol = symbol
+        self.days = days
+        self.start_index = start_index
+        self.max_steps = max_steps
+        self.segment = segment
+        self.train_ratio = train_ratio
+        self.valid_ratio = valid_ratio
+
+        # 新增切分相关参数（V22_8）
+        self.split_mode = split_mode
+        self.lookback_months = lookback_months
+        self.train_months = train_months
+        self.valid_months = valid_months
+        self.test_months = test_months
+
+        # 原始多周期数据
+        self.df_1h: Optional[pd.DataFrame] = None
+        self.df_15m: Optional[pd.DataFrame] = None
+        self.df_4h: Optional[pd.DataFrame] = None
+
+        # 对齐后完整的状态表 & 当前 segment 子集
+        self.df_state_full: Optional[pd.DataFrame] = None
+        self.df_state: Optional[pd.DataFrame] = None
+
+        # 账户 & 仓位
+        self.current_step: int = 0
+        self.cash: float = INITIAL_CAPITAL
+        self.equity: float = INITIAL_CAPITAL
+        self.initial_price: float = 0.0
+        self.position: Position = Position(side=0, leverage=0.0, entry_price=0.0, size=0.0)
+        self.done: bool = False
+
+        self.prev_equity: float = INITIAL_CAPITAL
+        self.steps_in_episode: int = 0
+        self.equity_peak: float = INITIAL_CAPITAL
+        self.last_realized_pnl: float = 0.0
+
+        # 加载多周期数据 + 状态 + 切片
+        self._load_data_multitf()
+        self._build_multitf_state()
+        self._apply_segment_split()
+
+        self.action_space_n = 4
+
+        # 预先构建一个 state 模板，获取维度
+        tmp_state = self._build_state_vector(
+            idx=0,
+            equity=INITIAL_CAPITAL,
+            cash=INITIAL_CAPITAL,
+            position=Position(0, 0.0, 0.0, 0.0),
+            unrealized_pnl_ratio=0.0,
+        )
+        self.state_dim = tmp_state.shape[0]
+
+        logger.info(
+            f"[EnvV22_8] segment={self.segment}, usable_len={len(self.df_state)}, "
+            f"state_dim={self.state_dim}"
+        )
+
+    # ========= 多周期数据 & 状态 =========
+
+    
+    def _load_data_multitf(self) -> None:
+        logger.info(f"[EnvV22_8] 加载多周期数据: {self.symbol}, days={self.days}")
+
+        # 使用 5m 作为主周期数据源
+        raw_5m = load_local_kline(self.symbol, "5m", self.days + 5)
+        self.df_5m = _ensure_ohlc(raw_5m)
+
+    def _build_multitf_state(self) -> None:
+        """
+        使用 5m 为主时间轴，构建多周期特征：
+        - 5m: 价格作为交易执行价格
+        - 1h: 趋势 & 波动率 & ATR
+        - 4h: 趋势方向/强度
+        - 15m: 动量 & 突破信号，按小时聚合后再对齐到 5m
+        """
+        df5 = self.df_5m.copy().sort_index()
+        close_5m = df5["close"]
+
+        # ===== 1h / 4h / 15m 重采样 OHLC =====
+        df1 = df5.resample("1H").agg({"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+        df4 = df5.resample("4H").agg({"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+        df15 = df5.resample("15T").agg({"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+
+        # ===== 1h 特征 =====
+        close_1h = df1["close"]
+        df1["ret_1"] = close_1h.pct_change(1)
+        df1["ret_6"] = close_1h.pct_change(6)
+        df1["ret_24"] = close_1h.pct_change(24)
+
+        ema_fast_1h = close_1h.ewm(span=20, adjust=False).mean()
+        ema_slow_1h = close_1h.ewm(span=60, adjust=False).mean()
+        df1["ema_fast_ratio"] = ema_fast_1h / close_1h - 1.0
+        df1["ema_slow_ratio"] = ema_slow_1h / close_1h - 1.0
+
+        atr_14_1h = _calc_atr(df1, period=14)
+        df1["atr_14"] = atr_14_1h
+        df1["atr_ratio"] = atr_14_1h / close_1h
+
+        df1["vol_24"] = close_1h.pct_change().rolling(24).std()
+        df1["close_norm"] = close_1h / close_1h.iloc[0]
+
+        # ===== 4h 趋势特征 =====
+        close_4h = df4["close"]
+        ema_fast_4h = close_4h.ewm(span=30, adjust=False).mean()
+        ema_slow_4h = close_4h.ewm(span=90, adjust=False).mean()
+        trend_raw_4h = (ema_fast_4h - ema_slow_4h) / (close_4h + 1e-9)
+        df4["trend_raw_4h"] = trend_raw_4h
+        df4["trend_dir_4h"] = np.sign(trend_raw_4h)
+
+        abs_t4 = trend_raw_4h.abs()
+        lo4, hi4 = abs_t4.quantile(0.1), abs_t4.quantile(0.9)
+        span4 = hi4 - lo4 if hi4 > lo4 else 1e-9
+        df4["trend_strength_4h"] = ((abs_t4 - lo4) / span4).clip(0, 1)
+
+        # ===== 15m 动量/突破，按小时聚合 =====
+        close_15 = df15["close"]
+        df15["mom_8"] = close_15 / close_15.shift(8) - 1.0
+        df15["vol_16"] = close_15.pct_change().rolling(16).std()
+
+        high_15 = df15["high"]
+        low_15 = df15["low"]
+        df15["hh_40"] = high_15.rolling(40).max().shift(1)
+        df15["ll_40"] = low_15.rolling(40).min().shift(1)
+        df15["breakout_up"] = close_15 > df15["hh_40"]
+        df15["breakout_down"] = close_15 < df15["ll_40"]
+
+        df15["hour_ts"] = df15.index.floor("H")
+        g15 = df15.groupby("hour_ts")
+        df15_agg = pd.DataFrame(
+            {
+                "mom_8_1h": g15["mom_8"].mean(),
+                "vol_16_1h": g15["vol_16"].mean(),
+                "breakout_up_1h": g15["breakout_up"].any(),
+                "breakout_down_1h": g15["breakout_down"].any(),
+            }
+        )
+
+        # ===== 将 1h / 4h / 15m 特征对齐到 5m 轴 =====
+        idx5 = df5.index
+
+        feat_1h = df1[
+            ["ret_1", "ret_6", "ret_24", "ema_fast_ratio", "ema_slow_ratio", "atr_ratio", "vol_24", "close_norm"]
+        ].reindex(idx5, method="ffill")
+
+        feat_4h = df4[["trend_raw_4h", "trend_dir_4h", "trend_strength_4h"]].reindex(idx5, method="ffill")
+
+        feat_15 = df15_agg.reindex(idx5, method="ffill")
+        if "breakout_up_1h" in feat_15.columns:
+            feat_15["breakout_up_1h"] = feat_15["breakout_up_1h"].fillna(False)
+        if "breakout_down_1h" in feat_15.columns:
+            feat_15["breakout_down_1h"] = feat_15["breakout_down_1h"].fillna(False)
+
+        # ===== 组合为最终 df_state_full (5m 频率) =====
+        df_state = pd.DataFrame(index=idx5)
+        df_state["close"] = close_5m
+
+        df_state = df_state.join(feat_1h)
+        df_state = df_state.join(feat_4h)
+        df_state = df_state.join(feat_15)
+
+        # Regime 判定（使用 1h 趋势/波动代理）
+        trend_proxy = (df_state["ema_fast_ratio"] - df_state["ema_slow_ratio"]).abs()
+        vol_proxy = df_state["vol_24"].fillna(0)
+
+        t_norm = _zscore(trend_proxy.fillna(0), window=200).clip(-3, 3)
+        v_norm = _zscore(vol_proxy, window=200).clip(-3, 3)
+
+        regime = np.zeros(len(df_state), dtype=int)
+        regime[(t_norm > 0.5) & (v_norm > -0.5)] = 1
+        regime[(t_norm > 1.0) & (v_norm < 1.5)] = 2
+
+        df_state["regime"] = regime
+        df_state["trend_proxy"] = trend_proxy
+        df_state["vol_proxy"] = vol_proxy
+
+        # 丢弃 warm-up 阶段的 NaN
+        df_state = df_state.dropna().copy()
+        self.df_state_full = df_state
+    def _apply_segment_split(self) -> None:
+        """
+        根据 segment / split_mode 将 df_state_full 切分为 train/valid/test 段。
+
+        split_mode:
+            - "ratio": 使用 train_ratio / valid_ratio （兼容 V22_6）
+            - "recent_6_1_5": 最近 lookback_months（默认 12）个月，
+                               按 train_months : valid_months : test_months 切分
+        """
+        import pandas as pd
+
+        df_full = self.df_state_full.sort_index()
+        n_full = len(df_full)
+        if n_full < 100:
+            raise ValueError(f"可用状态数据太少: {n_full}")
+
+        if self.split_mode == "ratio":
+            # ====== 保持 V22_6 的行为不变 ======
+            df = df_full
+            n = len(df)
+            train_end = int(n * self.train_ratio)
+            valid_end = int(n * (self.train_ratio + self.valid_ratio))
+
+            # 防止边界问题
+            train_end = max(train_end, 30)
+            valid_end = max(valid_end, train_end + 10)
+            valid_end = min(valid_end, n - 20)
+
+            if self.segment == "train":
+                seg_df = df.iloc[:train_end].copy()
+            elif self.segment == "valid":
+                seg_df = df.iloc[train_end:valid_end].copy()
+            else:
+                seg_df = df.iloc[valid_end:].copy()
+
+        elif self.split_mode == "recent_6_1_5":
+            # ====== 新模式：取最近 lookback_months 个月，再按 6/1/5 切 ======
+            total_months = self.train_months + self.valid_months + self.test_months
+            if total_months <= 0:
+                raise ValueError("total_months 必须 > 0")
+
+            end_ts = df_full.index.max()
+            window_start = end_ts - pd.DateOffset(months=self.lookback_months)
+            df_win = df_full[df_full.index >= window_start].copy()
+
+            n = len(df_win)
+            if n < 100:
+                raise ValueError(
+                    f"recent_6_1_5 模式下窗口数据太少: {n} 行，"
+                    f"请适当增大 days 或减小 lookback_months"
+                )
+
+            # 按月比率在最近窗口内划分
+            train_ratio_m = self.train_months / total_months
+            valid_ratio_m = self.valid_months / total_months
+
+            train_end = int(n * train_ratio_m)
+            valid_end = int(n * (train_ratio_m + valid_ratio_m))
+
+            train_end = max(train_end, 30)
+            valid_end = max(valid_end, train_end + 10)
+            valid_end = min(valid_end, n - 20)
+
+            if self.segment == "train":
+                seg_df = df_win.iloc[:train_end].copy()
+            elif self.segment == "valid":
+                seg_df = df_win.iloc[train_end:valid_end].copy()
+            else:
+                seg_df = df_win.iloc[valid_end:].copy()
+
+        else:
+            raise ValueError(f"非法 split_mode: {self.split_mode}")
+
+        if len(seg_df) < 50:
+            raise ValueError(f"segment={self.segment} 数据太短: {len(seg_df)}")
+
+        self.df_state = seg_df.reset_index(drop=True)
+
+        # 调整 start_index 相对于分段后的 df_state
+        if self.start_index < 20:
+            self.start_index = 20
+        if self.start_index >= len(self.df_state) - 20:
+            self.start_index = max(20, len(self.df_state) // 3)
+
+# ========= 接口 =========
+
+    def reset(self) -> np.ndarray:
+        self.done = False
+        self.cash = INITIAL_CAPITAL
+        self.equity = INITIAL_CAPITAL
+        self.prev_equity = INITIAL_CAPITAL
+        self.equity_peak = INITIAL_CAPITAL
+        self.position = Position(side=0, leverage=0.0, entry_price=0.0, size=0.0)
+        self.steps_in_episode = 0
+        self.last_realized_pnl = 0.0
+
+        self.current_step = self.start_index
+        self.initial_price = float(self.df_state["close"].iloc[self.current_step])
+
+        obs = self._get_state(unrealized_pnl=0.0)
+        return obs
+
+    def step(self, action: int):
+        if self.done:
+            raise RuntimeError("环境已结束，请先 reset()。")
+        if action not in (0, 1, 2, 3):
+            raise ValueError(f"非法动作: {action}")
+
+        self.last_realized_pnl = 0.0
+
+        price = float(self.df_state["close"].iloc[self.current_step])
+        self._apply_action(action, price)
+        self.prev_equity = self.equity
+
+        # 时间前进一步
+        self.current_step += 1
+        self.steps_in_episode += 1
+        next_price = float(self.df_state["close"].iloc[self.current_step])
+
+        # Mark-to-Market 未实现盈亏
+        unrealized_pnl = self._mark_to_market(next_price)
+
+        # 记录 equity 峰值
+        if self.equity > self.equity_peak:
+            self.equity_peak = self.equity
+
+        # ===== Reward Shaping 3.0 =====
+        row = self.df_state.iloc[self.current_step]
+        trend_dir_4h = float(row["trend_dir_4h"])
+        trend_strength_4h = float(row["trend_strength_4h"])
+        regime = float(row["regime"])
+
+        delta_equity = self.equity - self.prev_equity
+        pnl_reward = delta_equity / INITIAL_CAPITAL
+
+        trend_reward = 0.0
+        pos = self.position
+        if pos.side != 0:
+            align = pos.side * trend_dir_4h
+            if align > 0:
+                base = 0.001
+                regime_factor = 1.0 + 0.5 * (regime == 2)
+                trend_reward = base * trend_strength_4h * regime_factor
+
+        close_reward = 0.0
+        if action == 3 and abs(self.last_realized_pnl) > 1e-6:
+            close_reward = 0.05 * (self.last_realized_pnl / INITIAL_CAPITAL)
+
+        time_penalty = 0.00001
+
+        if pos.size > 0 and self.equity > 0:
+            position_value = abs(pos.size * next_price)
+            exposure_ratio = position_value / self.equity
+        else:
+            exposure_ratio = 0.0
+        exposure_penalty = 0.00001 * exposure_ratio
+
+        anti_trend_penalty = 0.0
+        if pos.side != 0:
+            align = pos.side * trend_dir_4h
+            if align < 0 and trend_strength_4h > 0.3:
+                anti_trend_penalty = 0.002 * trend_strength_4h
+
+        dd_ratio = (self.equity - self.equity_peak) / (self.equity_peak + 1e-9)
+        drawdown_penalty = 0.0
+        if dd_ratio < -0.4:
+            drawdown_penalty = -0.01
+
+        reward = (
+            pnl_reward
+            + trend_reward
+            + close_reward
+            - time_penalty
+            - exposure_penalty
+            - anti_trend_penalty
+            + drawdown_penalty
+        )
+        reward = float(np.clip(reward, -0.1, 0.1))
+
+        # 终止条件
+        if self.current_step >= len(self.df_state) - 2:
+            self.done = True
+        if self.max_steps is not None and self.steps_in_episode >= self.max_steps:
+            self.done = True
+        if self.equity <= INITIAL_CAPITAL * 0.1:
+            self.done = True
+
+        obs = self._get_state(unrealized_pnl=unrealized_pnl)
+        info = {
+            "equity": self.equity,
+            "prev_equity": self.prev_equity,
+            "cash": self.cash,
+            "price": next_price,
+            "step": self.steps_in_episode,
+            "position_side": self.position.side,
+            "position_leverage": self.position.leverage,
+            "position_size": self.position.size,
+            "reward_pnl": pnl_reward,
+            "trend_reward": trend_reward,
+            "close_reward": close_reward,
+            "exposure_penalty": exposure_penalty,
+            "time_penalty": time_penalty,
+            "anti_trend_penalty": anti_trend_penalty,
+            "drawdown_penalty": drawdown_penalty,
+            "dd_ratio": dd_ratio,
+        }
+        return obs, reward, self.done, info
+
+    def action_space_sample(self) -> int:
+        return int(np.random.randint(0, self.action_space_n))
+
+    # ========= 内部交易逻辑 =========
+
+    def _apply_action(self, action: int, price: float) -> None:
+        pos = self.position
+
+        if action == 0:
+            return
+
+        if action == 3 and pos.side != 0:
+            self._close_position(price)
+            return
+
+        if action == 1 and pos.side == 0:
+            self._open_position(side=1, price=price)
+            return
+
+        if action == 2 and pos.side == 0:
+            self._open_position(side=-1, price=price)
+            return
+
+        return
+
+    def _open_position(self, side: int, price: float) -> None:
+        if self.cash <= 0:
+            return
+
+        target_leverage = 2.0
+        notional = self.cash * target_leverage
+        size = notional / price
+
+        fee = notional * TRADING_FEE_RATE
+        slippage_price = price * (1 + SLIPPAGE_RATE * side)
+
+        if fee >= self.cash * 0.5:
+            return
+
+        self.cash -= fee
+
+        self.position = Position(
+            side=side,
+            leverage=target_leverage,
+            entry_price=slippage_price,
+            size=size,
+        )
+
+        self.equity = self.cash
+
+    def _close_position(self, price: float) -> None:
+        pos = self.position
+        if pos.side == 0 or pos.size <= 0:
+            return
+
+        slippage_price = price * (1 - SLIPPAGE_RATE * pos.side)
+
+        notional_entry = pos.entry_price * pos.size
+        notional_exit = slippage_price * pos.size
+
+        if pos.side > 0:
+            pnl = notional_exit - notional_entry
+        else:
+            pnl = notional_entry - notional_exit
+
+        fee = notional_exit * TRADING_FEE_RATE
+
+        self.cash += pnl
+        self.cash -= fee
+
+        self.position = Position(side=0, leverage=0.0, entry_price=0.0, size=0.0)
+        self.equity = self.cash
+
+        self.last_realized_pnl = pnl - fee
+
+    def _mark_to_market(self, price: float) -> float:
+        pos = self.position
+        if pos.side == 0 or pos.size <= 0:
+            self.equity = self.cash
+            return 0.0
+
+        notional_entry = pos.entry_price * pos.size
+        notional_now = price * pos.size
+
+        if pos.side > 0:
+            pnl_unrealized = notional_now - notional_entry
+        else:
+            pnl_unrealized = notional_entry - notional_now
+
+        self.equity = self.cash + pnl_unrealized
+        return pnl_unrealized
+
+    # ========= 状态构建 =========
+
+    def _build_state_vector(
+        self,
+        idx: int,
+        equity: float,
+        cash: float,
+        position: Position,
+        unrealized_pnl_ratio: float,
+    ) -> np.ndarray:
+        row = self.df_state.iloc[idx]
+
+        close_norm = float(row["close_norm"])
+        ret_1 = float(row["ret_1"])
+        ret_6 = float(row["ret_6"])
+        ret_24 = float(row["ret_24"])
+        ema_fast_ratio = float(row["ema_fast_ratio"])
+        ema_slow_ratio = float(row["ema_slow_ratio"])
+        atr_ratio = float(row["atr_ratio"])
+        vol_24 = float(row["vol_24"])
+
+        trend_raw_4h = float(row["trend_raw_4h"])
+        trend_dir_4h = float(row["trend_dir_4h"])
+        trend_strength_4h = float(row["trend_strength_4h"])
+
+        mom_8_1h = float(row["mom_8_1h"]) if not np.isnan(row["mom_8_1h"]) else 0.0
+        vol_16_1h = float(row["vol_16_1h"]) if not np.isnan(row["vol_16_1h"]) else 0.0
+        breakout_up_1h = 1.0 if bool(row["breakout_up_1h"]) else 0.0
+        breakout_down_1h = 1.0 if bool(row["breakout_down_1h"]) else 0.0
+
+        regime = float(row["regime"])
+        trend_proxy = float(row["trend_proxy"])
+        vol_proxy = float(row["vol_proxy"])
+
+        pos_side = float(position.side)
+        pos_leverage_norm = float(position.leverage / 5.0)
+        if position.size > 0 and equity > 0:
+            position_value = position.size * float(row["close"])
+            position_value_ratio = float(position_value / equity)
+        else:
+            position_value_ratio = 0.0
+
+        equity_ratio = float(equity / INITIAL_CAPITAL)
+        cash_ratio = float(cash / INITIAL_CAPITAL)
+
+        state = np.array(
+            [
+                close_norm,
+                ret_1,
+                ret_6,
+                ret_24,
+                ema_fast_ratio,
+                ema_slow_ratio,
+                atr_ratio,
+                vol_24,
+                trend_raw_4h,
+                trend_dir_4h,
+                trend_strength_4h,
+                mom_8_1h,
+                vol_16_1h,
+                breakout_up_1h,
+                breakout_down_1h,
+                regime,
+                trend_proxy,
+                vol_proxy,
+                pos_side,
+                pos_leverage_norm,
+                position_value_ratio,
+                unrealized_pnl_ratio,
+                equity_ratio,
+                cash_ratio,
+            ],
+            dtype=np.float32,
+        )
+        return state
+
+    def _get_state(self, unrealized_pnl: float) -> np.ndarray:
+        unrealized_pnl_ratio = unrealized_pnl / (INITIAL_CAPITAL + 1e-9)
+        return self._build_state_vector(
+            idx=self.current_step,
+            equity=self.equity,
+            cash=self.cash,
+            position=self.position,
+            unrealized_pnl_ratio=unrealized_pnl_ratio,
+        )
+
+
+if __name__ == "__main__":
+    # 简单双随机策略自检
+    env = TradingEnvV22MultiTFV8(symbol="BTCUSDT", days=365, segment="train", split_mode="recent_6_1_5")
+    obs = env.reset()
+    logger.info(f"[EnvV22_8] 初始 obs 维度: {obs.shape}, 示例前 5 个: {obs[:5]}")
+    total_r = 0.0
+    steps = 0
+    done = False
+    while not done and steps < 300:
+        a = env.action_space_sample()
+        obs, r, done, info = env.step(a)
+        total_r += r
+        steps += 1
+    logger.info(
+        f"[EnvV22_8] 随机策略测试结束: 步数={steps}, 总reward={total_r:.4f}, 最终权益={info.get('equity', None):.2f}"
+    )
