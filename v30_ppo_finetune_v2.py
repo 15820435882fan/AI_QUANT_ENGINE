@@ -1,0 +1,397 @@
+# v30_ppo_finetune_v2.py
+#
+# ⭐ 修复版 v2 —— 完整可运行版本
+# 包含：
+#   1) 自动跳过 input_proj 权重（解决 9→17 输入维度 mismatch 报错）
+#   2) 启动时打印多周期特征维度 feature_dim
+#   3) 完整 PPO 微调流程（可直接运行）
+#
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from typing import Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.distributions.categorical import Categorical
+
+from v30_model import build_v30_transformer
+from v30_rl_env import V30RLEnv, V30RLEnvConfig
+
+
+# ---------------- PPO 配置 ----------------
+@dataclass
+class PPOConfig:
+    total_steps: int = 200_000
+    rollout_steps: int = 1024
+    batch_size: int = 256
+    gamma: float = 0.99
+    lam: float = 0.95
+    ppo_epochs: int = 5
+    clip_ratio: float = 0.2
+    lr: float = 3e-4
+    vf_coef: float = 0.5
+    ent_coef: float = 0.01
+    max_grad_norm: float = 0.5
+    device: str = "auto"
+    train_transformer: bool = True  # 是否微调 transformer 主体
+
+
+# ---------------- Actor-Critic 模型 ----------------
+class V30ActorCritic(nn.Module):
+    """
+    基于 v30 Transformer 的 Actor-Critic：
+    - Transformer: 状态特征抽取
+    - policy_head: 动作 logits
+    - value_head: 状态价值
+    """
+
+    def __init__(self, seq_len: int, feature_dim: int, num_actions: int = 4):
+        super().__init__()
+        self.transformer = build_v30_transformer(
+            feature_dim=feature_dim,
+            num_actions=num_actions,
+            num_risks=3,
+            seq_len=seq_len,
+        )
+        self.policy_head = self.transformer.action_head
+
+        d_model = self.transformer.config.d_model
+        self.value_head = nn.Linear(d_model, 1)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        x: [B, T, F]
+        返回:
+            logits: [B, num_actions]
+            values: [B, 1]
+        """
+        h = self.transformer.input_proj(x)
+        h = self.transformer.pos_encoder(h)
+        h = self.transformer.transformer(h)
+        h = self.transformer.norm(h)
+        ctx = h[:, -1, :]
+        logits = self.policy_head(ctx)
+        values = self.value_head(ctx)
+        return logits, values
+
+
+# ---------------- 加载监督模型（迁移学习） ----------------
+def load_pretrained_actor_critic(
+    seq_len: int,
+    feature_dim: int,
+    num_actions: int,
+    ckpt_path: str,
+    device: torch.device,
+    train_transformer: bool = True,
+) -> V30ActorCritic:
+    """
+    修复点：
+    - 自动移除 input_proj.* 权重（从9维到17维必须重建）
+    """
+    model = V30ActorCritic(seq_len=seq_len, feature_dim=feature_dim, num_actions=num_actions)
+
+    print(f"[PPO Loader] 加载监督模型: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=device)
+    state_dict = ckpt["model_state_dict"]
+
+    # 过滤掉 input_proj 层（维度不匹配）
+    remove_keys = [k for k in state_dict.keys() if k.startswith("input_proj.")]
+    if remove_keys:
+        print(f"[PPO Loader] ⚠ 删除不兼容 input_proj 权重: {len(remove_keys)}")
+        for k in remove_keys:
+            del state_dict[k]
+
+    # 迁移 encoder + action_head
+    model.transformer.load_state_dict(state_dict, strict=False)
+
+    model.to(device)
+
+    if not train_transformer:
+        for p in model.transformer.parameters():
+            p.requires_grad = False
+
+    print("[PPO Loader] ✓ 监督权重迁移完成（input_proj 已重建）")
+    return model
+
+
+# ---------------- GAE-Lambda ----------------
+def compute_gae(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
+    last_value: torch.Tensor,
+    gamma: float,
+    lam: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    T = rewards.size(0)
+    advantages = torch.zeros(T, dtype=torch.float32, device=rewards.device)
+    last_adv = 0.0
+
+    for t in reversed(range(T)):
+        if t == T - 1:
+            next_value = last_value
+        else:
+            next_value = values[t + 1]
+
+        mask = 1.0 - dones[t]
+        delta = rewards[t] + gamma * next_value * mask - values[t]
+        last_adv = delta + gamma * lam * mask * last_adv
+        advantages[t] = last_adv
+
+    returns = advantages + values
+    return advantages, returns
+
+
+# ---------------- PPO 更新核心 ----------------
+def ppo_update(
+    actor_critic: V30ActorCritic,
+    optimizer: torch.optim.Optimizer,
+    obs: torch.Tensor,
+    actions: torch.Tensor,
+    logprobs_old: torch.Tensor,
+    returns: torch.Tensor,
+    advantages: torch.Tensor,
+    cfg: PPOConfig,
+) -> Tuple[float, float, float]:
+
+    device = obs.device
+    n = obs.size(0)
+    idxs = torch.randperm(n, device=device)
+
+    policy_losses, value_losses, entropies = [], [], []
+
+    for _ in range(cfg.ppo_epochs):
+        for start in range(0, n, cfg.batch_size):
+            end = start + cfg.batch_size
+            batch_idx = idxs[start:end]
+
+            b_obs = obs[batch_idx]
+            b_actions = actions[batch_idx]
+            b_logprobs_old = logprobs_old[batch_idx]
+            b_returns = returns[batch_idx]
+            b_advantages = advantages[batch_idx]
+
+            logits, values = actor_critic(b_obs)
+            dist = Categorical(logits=logits)
+            logprobs = dist.log_prob(b_actions)
+            entropy = dist.entropy().mean()
+
+            ratio = (logprobs - b_logprobs_old).exp()
+            surr1 = ratio * b_advantages
+            surr2 = torch.clamp(ratio, 1.0 - cfg.clip_ratio, 1.0 + cfg.clip_ratio) * b_advantages
+            policy_loss = -torch.min(surr1, surr2).mean()
+
+            value_loss = (b_returns - values.squeeze(-1)).pow(2).mean()
+
+            loss = policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy
+
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(actor_critic.parameters(), cfg.max_grad_norm)
+            optimizer.step()
+
+            policy_losses.append(policy_loss.detach())
+            value_losses.append(value_loss.detach())
+            entropies.append(entropy.detach())
+
+    return (
+        torch.stack(policy_losses).mean().item(),
+        torch.stack(value_losses).mean().item(),
+        torch.stack(entropies).mean().item(),
+    )
+
+
+# ---------------- PPO 训练入口 ----------------
+def train_ppo(
+    symbol: str,
+    timeframe: str,
+    pretrained_path: str,
+    out_path: str,
+    env_days: int = 365,
+    env_episode_steps: int = 512,
+    seq_len: int = 128,
+    cfg: PPOConfig | None = None,
+) -> str:
+
+    if cfg is None:
+        cfg = PPOConfig()
+
+    # 设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") \
+             if cfg.device == "auto" else torch.device(cfg.device)
+    print(f"[V30 PPO] 使用 device={device}")
+
+    # 环境（带多周期特征）
+    env_cfg = V30RLEnvConfig(
+        symbol=symbol,
+        base_timeframe=timeframe,
+        mid_timeframe="15m",
+        fast_timeframe="5m",
+        days=env_days,
+        seq_len=seq_len,
+        episode_steps=env_episode_steps,
+        initial_equity=10_000.0,
+    )
+    env = V30RLEnv(env_cfg)
+
+    feature_dim = env.feats.shape[1]
+    print(f"[V30 PPO] 特征维度(feature_dim): {feature_dim}")
+
+    num_actions = 4
+
+    # 加载监督模型（迁移学习）
+    actor_critic = load_pretrained_actor_critic(
+        seq_len=seq_len,
+        feature_dim=feature_dim,
+        num_actions=num_actions,
+        ckpt_path=pretrained_path,
+        device=device,
+        train_transformer=cfg.train_transformer,
+    )
+
+    optimizer = torch.optim.Adam(
+        [p for p in actor_critic.parameters() if p.requires_grad],
+        lr=cfg.lr,
+    )
+
+    obs_buf, act_buf, logp_buf, rew_buf, done_buf, val_buf = [], [], [], [], [], []
+
+    total_steps = 0
+    episode_count = 0
+
+    obs = env.reset()
+
+    # ----------- 训练循环 -----------
+    while total_steps < cfg.total_steps:
+
+        for _ in range(cfg.rollout_steps):
+            obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+
+            with torch.no_grad():
+                logits, value = actor_critic(obs_t)
+                dist = Categorical(logits=logits)
+                action = dist.sample()
+                logprob = dist.log_prob(action)
+
+            action_int = int(action.item())
+            next_obs, reward, done, info = env.step(action_int)
+
+            obs_buf.append(obs)
+            act_buf.append(action_int)
+            logp_buf.append(float(logprob.item()))
+            rew_buf.append(float(reward))
+            done_buf.append(float(done))
+            val_buf.append(float(value.item()))
+
+            obs = next_obs
+            total_steps += 1
+
+            if done:
+                episode_count += 1
+                obs = env.reset()
+
+            if total_steps >= cfg.total_steps:
+                break
+
+        # 转 tensor
+        obs_tensor = torch.tensor(np.array(obs_buf), dtype=torch.float32, device=device)
+        actions_tensor = torch.tensor(np.array(act_buf), dtype=torch.int64, device=device)
+        logprobs_old_tensor = torch.tensor(np.array(logp_buf), dtype=torch.float32, device=device)
+        rewards_tensor = torch.tensor(np.array(rew_buf), dtype=torch.float32, device=device)
+        dones_tensor = torch.tensor(np.array(done_buf), dtype=torch.float32, device=device)
+        values_tensor = torch.tensor(np.array(val_buf), dtype=torch.float32, device=device)
+
+        obs_last_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        with torch.no_grad():
+            _, last_value = actor_critic(obs_last_t)
+
+        last_val_scalar = float(last_value.squeeze(-1).item())
+        last_val_tensor = torch.tensor(last_val_scalar, device=device, dtype=torch.float32)
+
+        advantages, returns = compute_gae(
+            rewards=rewards_tensor,
+            values=values_tensor,
+            dones=dones_tensor,
+            last_value=last_val_tensor,
+            gamma=cfg.gamma,
+            lam=cfg.lam,
+        )
+
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        pl, vl, ent = ppo_update(
+            actor_critic,
+            optimizer,
+            obs_tensor,
+            actions_tensor,
+            logprobs_old_tensor,
+            returns,
+            advantages,
+            cfg,
+        )
+
+        print(f"[V30 PPO] steps={total_steps} episodes={episode_count} "
+              f"pl={pl:.4f} vl={vl:.4f} ent={ent:.4f} "
+              f"avg_reward={rewards_tensor.mean().item():.6f}")
+
+        obs_buf.clear(); act_buf.clear(); logp_buf.clear()
+        rew_buf.clear(); done_buf.clear(); val_buf.clear()
+
+    # 保存最终结果
+    ckpt = {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "seq_len": seq_len,
+        "feature_dim": feature_dim,
+        "model_state_dict": actor_critic.transformer.state_dict(),
+    }
+    torch.save(ckpt, out_path)
+    print(f"[V30 PPO] 微调完成 → 已保存到: {out_path}")
+
+    return out_path
+
+
+# ---------------- CLI ----------------
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--symbol", type=str, default="BTCUSDT")
+    p.add_argument("--timeframe", type=str, default="1h")
+    p.add_argument("--pretrained-path", type=str, default="")
+    p.add_argument("--out-path", type=str, default="")
+    p.add_argument("--total-steps", type=int, default=200000)
+    p.add_argument("--rollout-steps", type=int, default=1024)
+    p.add_argument("--device", type=str, default="auto")
+    p.add_argument("--train-transformer", action="store_true")
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    symbol = args.symbol.upper()
+    timeframe = args.timeframe
+
+    pretrained_path = args.pretrained_path or f"models_v30/v30_transformer_{symbol}_{timeframe}_best.pt"
+    out_path = args.out_path or f"models_v30/v30_transformer_{symbol}_{timeframe}_ppo_v2.pt"
+
+    cfg = PPOConfig(
+        total_steps=args.total_steps,
+        rollout_steps=args.rollout_steps,
+        device=args.device,
+        train_transformer=args.train_transformer,
+    )
+
+    train_ppo(
+        symbol=symbol,
+        timeframe=timeframe,
+        pretrained_path=pretrained_path,
+        out_path=out_path,
+        env_days=365,
+        env_episode_steps=512,
+        seq_len=128,
+        cfg=cfg,
+    )
