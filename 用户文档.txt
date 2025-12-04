@@ -1,7 +1,24 @@
 markdown
 # 📚 AI量化交易系统使用指南
+BINANCE 趋势跟随：
+API:
+0Aaqabv6oZNnDJeKTgFPAUqDVslHWmGUjuGiBUVuNljP57SLT24plwU0JvhTotjK
+密钥：
+VyCOOUipbizlAPo0AfWkclBEZk7vWXCj3T4bX6WeMTR9THruy5TXMmaDhUa11qpr
 下载数据文件：
-python download_all_data.py（需要修改的在这里面修改参数）
+python download_all_data.py（需要修改的在这里面修改参数）、
+找币种打个分
+multi_trend_ranker.py
+
+BTC 单币回测 + 20 倍杠杆 + 抽水 10% + 止盈止损默认
+
+python v31_rule_trend_system_v31_1.py --symbol BTC --days 365 --leverage 20 --export-report results_v31_1.xlsx
+
+
+示例二：
+ETH，降低RR，保守一点：
+
+python v31_rule_trend_system_v31_1.py --symbol ETH --leverage 10 --rr-strong 3.0 --rr-normal 2.5
 
 ## 快速开始
 1. 启动系统: `python start_production.py`

@@ -1,0 +1,23 @@
+account:
+  initial_equity: 10000
+
+binance:
+  name: binance
+  apiKey: "cofCiTIiAr1gnBtoMW4dZ3a3EcyJ2ii9bM9OqTQfS7f5lZVMpMfKW8IWiT0Y1a4E"
+  secret: "TVdUrjwvXr33sBIVoQkIq3p03htNLHFtnqlkFXIr3WBGIzEYp8qbguZDe3eSE017"
+  enable_trading: true
+  enableRateLimit: true
+  hedge_mode: true
+
+  # 期货相关
+  options:
+    defaultType: future
+    adjustForTimeDifference: true
+
+  # 网络配置（中国用户必须）
+  proxies:
+    http: "http://127.0.0.1:26217"
+    https: "http://127.0.0.1:26217"
+
+  
+

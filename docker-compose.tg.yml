@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  ai_trader_live:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_trader_live
+    restart: always
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+    network_mode: bridge

@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ build-essential libffi-dev libssl-dev curl nano \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY live_trade_engine_v31_17_TG.py /app/
+COPY config_live_v31.yaml /app/
+COPY v31_core_v31_1.py /app/
+COPY notify.py /app/
+
+RUN mkdir -p /app/logs
+
+# 新增 requests 依赖
+RUN pip install --no-cache-dir ccxt pandas numpy pyyaml requests
+
+CMD ["python", "/app/live_trade_engine_v31_17_TG.py", "--symbols", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,DOGEUSDT,LTCUSDT", "--topk", "5", "--leverage", "5", "--risk-per-trade", "0.01", "--rr-strong", "4", "--rr-normal", "3", "--sl-mult-strong", "3.5", "--sl-mult-normal", "3", "--refresh-seconds", "10", "--initial-equity", "10000", "--live"]
